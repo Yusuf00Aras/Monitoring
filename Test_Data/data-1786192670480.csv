@@ -1,4 +1,4 @@
-"datetime","module","tags","metrics"
+datetime,module,tags,metrics
 "2026-08-07 00:00:00+02","zbx_cpu","{}","{""idle.pct"": 85.8, ""switches"": 7763.47, ""user.pct"": 7.76, ""util.pct"": 14.2, ""interrupts"": 14645.75, ""iowait.pct"": 2.37, ""system.pct"": 3.06}"
 "2026-08-07 00:00:00+02","zbx_filesystem","{""path"": ""/var""}","{""used.pct"": 25, ""used.bytes"": 1977380864, ""total.bytes"": 8350298112, ""inodes_used.pct"": 0.6}"
 "2026-08-07 00:00:00+02","zbx_filesystem","{""path"": ""/""}","{""used.pct"": 28.8, ""used.bytes"": 552185856, ""total.bytes"": 2040373248, ""inodes_used.pct"": 1.1}"

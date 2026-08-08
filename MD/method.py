@@ -1,14 +1,8 @@
 from scipy.spatial import distance
 import numpy as np
+from cleaning_utils import load_test_data
 
-test_data = np.array([
-    [170, 65],
-    [165, 62],
-    [180, 75],
-    [175, 71],
-    [190, 80],
-])
-
+test_data, timestamps, features = load_test_data('./Test_Data/data-1786192670480.csv')
 
 def mahalanobis_distances(data, regularize_eps=1e-8, use_pinv=True):
     mean = np.mean(data, axis=0)
@@ -32,5 +26,6 @@ distances = mahalanobis_distances(test_data)
 
 if __name__ == "__main__":
     cov = np.cov(test_data, rowvar=False)
+    distances = mahalanobis_distances(test_data)
     print("Covariance Matrix:", cov)
     print("Mahalanobis distances:", distances)
