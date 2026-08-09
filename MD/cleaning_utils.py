@@ -1,44 +1,63 @@
-import csv, json
-import numpy as np
+import csv
+import json
 
-PREFIX = {"zbx_cpu": "cpu", "zbx_filesystem": "fs", "zbx_memory": "mem", "zbx_system": "sys"}
+def load_test_data(path):
+    rows = []
 
-def load_test_data(path, max_col_nan=0.05):
-    rows = {}  # timestamp -> {feature: wert}
-    with open(path, newline="") as f:
-        for r in csv.reader(f):
-            if len(r) < 4:
-                continue
-            ts, mtype, tags_raw, metrics_raw = r[0], r[1], r[2], r[3]
-            try:
-                metrics = json.loads(metrics_raw)
-            except (ValueError, TypeError):
-                continue
-            prefix = PREFIX.get(mtype, mtype)
-            tags = json.loads(tags_raw) if tags_raw.strip() else {}
-            if "path" in tags:
-                p = "root" if tags["path"] == "/" else tags["path"].strip("/").replace("/", "_")
-                prefix = f"{prefix}_{p}"
-            for k, v in metrics.items():
-                if not isinstance(v, (int, float)) or isinstance(v, bool):
-                    continue  # Text-/Bool-Metriken überspringen
-                rows.setdefault(ts, {})[f"{prefix}_{k}".replace(".", "_")] = v
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
 
-    timestamps = sorted(rows)
-    features = sorted({k for row in rows.values() for k in row})
-    data = np.array([[rows[t].get(f, np.nan) for f in features] for t in timestamps], dtype=float)
+        for row in reader:
+            rows.append({
+                "datetime": row["datetime"],
+                "module": row["module"],
+                "tags": json.loads(row["tags"]) if row["tags"] else {},
+                "features": json.loads(row["metrics"])
+            })
+    print(rows[0])
+    return rows
 
-    # --- Bereinigung: verhindert NaN/inf in np.cov (sonst "SVD did not converge") ---
-    data[~np.isfinite(data)] = np.nan
-    col_ok = np.isnan(data).mean(axis=0) <= max_col_nan   # chronisch fehlende Spalten raus
-    dropped_cols = [f for f, k in zip(features, col_ok) if not k]
-    data = data[:, col_ok]
-    features = [f for f, k in zip(features, col_ok) if k]
-    row_ok = ~np.isnan(data).any(axis=1)                  # restliche unvollständige Minuten raus
-    dropped_rows = int((~row_ok).sum())
-    data = data[row_ok]
-    timestamps = [t for t, k in zip(timestamps, row_ok) if k]
+def aggregate_features(data):
+    aggregated_data = []
+    i = 0
+    while i <= 11:
+        aggregated_data.append({
+            "datetime": data[i]["datetime"],
+            "module": data[i]["module"],
+            "tags": data[i]["tags"],
+            "features": {
+                "cpu_user_pct": data[i]["features"]["cpu_user_pct"],
+                "cpu_system_pct": data[i]["features"]["cpu_system_pct"],
+                "cpu_iowait_pct": data[i]["features"]["cpu_iowait_pct"],
+                "cpu_switches": data[i]["features"]["cpu_switches"],
+                "cpu_interrupts": data[i]["features"]["cpu_interrupts"],
+                "mem_util_pct": data[i]["features"]["mem_util_pct"],
+                "mem_committed_as_kbytes": data[i]["features"]["mem_committed_as_kbytes"],
+                "sys_load_avg_1": data[i]["features"]["sys_load_avg_1"],
+                "sys_load_avg_15": data[i]["features"]["sys_load_avg_15"],
+                "sys_proc_count": data[i]["features"]["sys_proc_count"],
+                "sys_swap_used_pct": data[i]["features"]["sys_swap_used_pct"]
+            }
+        })
+        i += 12
+    return aggregated_data
 
-    print(f"[load_test_data] {data.shape[0]} Minuten x {data.shape[1]} Features "
-          f"| Spalten verworfen: {dropped_cols} | Minuten verworfen: {dropped_rows}")
-    return data, timestamps, features
+def extract_important_features(data):
+    important_features = []
+    for row in data:
+        important_features.append([
+            row["features"]["cpu_user_pct"],
+            row["features"]["cpu_system_pct"],
+            row["features"]["cpu_iowait_pct"],
+            row["features"]["cpu_switches"],
+            row["features"]["cpu_interrupts"],
+            row["features"]["mem_util_pct"],
+            row["features"]["mem_committed_as_kbytes"],
+            row["features"]["sys_load_avg_1"],
+            row["features"]["sys_load_avg_15"],
+            row["features"]["sys_proc_count"],
+            row["features"]["sys_swap_used_pct"]
+        ])
+    return important_features
+
+load_test_data('./Test_Data/data-1786192670480.csv')
