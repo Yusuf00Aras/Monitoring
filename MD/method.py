@@ -1,8 +1,8 @@
 from scipy.spatial import distance
 import numpy as np
-from cleaning_utils import load_test_data
+from cleaning_utils import extract_important_features
 
-test_data, timestamps, features = load_test_data('./Test_Data/data-1786192670480.csv')
+features = extract_important_features('./Test_Data/data-1786192670480.csv')
 
 def mahalanobis_distances(data, regularize_eps=1e-8, use_pinv=True):
     mean = np.mean(data, axis=0)
@@ -21,11 +21,11 @@ def mahalanobis_distances(data, regularize_eps=1e-8, use_pinv=True):
 
 # Module-level convenience variable (computed from `test_data`).
 # Importing modules that rely on `distances` can use this variable.
-distances = mahalanobis_distances(test_data)
+distances = mahalanobis_distances(features)
 
 
 if __name__ == "__main__":
-    cov = np.cov(test_data, rowvar=False)
-    distances = mahalanobis_distances(test_data)
+    cov = np.cov(features, rowvar=False)
+    distances = mahalanobis_distances(features)
     print("Covariance Matrix:", cov)
     print("Mahalanobis distances:", distances)
