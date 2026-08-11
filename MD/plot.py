@@ -1,36 +1,35 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from method import distances, test_data
+from method import features, mahalanobis_distances
 
 
-def plot_distances(distances, X):
-	mean = np.mean(X, axis=0)
-	threshold = 1.5
+def plot_distances(distances):
+	time = np.arange(len(distances))
+	mean = np.mean(distances)
+	threshold = mean + 3 * np.std(distances)
 	outliers = distances > threshold
 
-	plt.figure(figsize=(8, 6))
-	scatter = plt.scatter(X[:, 0], X[:, 1], c=distances, cmap='coolwarm', s=100, edgecolor='black')
+	plt.figure(figsize=(10, 6))
+	plt.plot(time, distances, color='steelblue', linewidth=1.5, label='Mahalanobis distance')
+	plt.scatter(time[outliers], distances[outliers], facecolors='none', edgecolors='red', s=100, label='Outlier')
+	plt.axhline(threshold, color='darkred', linestyle='--', linewidth=1.5, label='Threshold')
 
 	for i, d in enumerate(distances):
-		plt.text(X[i, 0] + 0.5, X[i, 1], f'{d:.2f}', fontsize=9)
+		if outliers[i]:
+			plt.text(time[i], d + 0.05, f'{d:.2f}', fontsize=8, ha='center')
 
-	plt.scatter(mean[0], mean[1], color='green', marker='X', s=200, label='Mean')
-	plt.scatter(X[outliers, 0], X[outliers, 1], facecolors='none', edgecolors='red', s=200, label='Outlier')
-
-	plt.title('Mahalanobis Distance Outlier Detection')
-	plt.xlabel('Bidah')
-	plt.ylabel('Salafi')
-	plt.colorbar(scatter, label='Mahalanobis Distance')
+	plt.title('Mahalanobis Distance Over Time')
+	plt.xlabel('Time / Minute')
+	plt.ylabel('Mahalanobis Distance')
 	plt.legend()
-	plt.grid(True)
+	plt.grid(True, alpha=0.3)
 	plt.tight_layout()
 	plt.show()
 
 
-def main():
-	plot_distances(distances, test_data)
-
 
 if __name__ == "__main__":
-	main()
+	distances = mahalanobis_distances(features)
+	plot_distances(distances)
+
 
