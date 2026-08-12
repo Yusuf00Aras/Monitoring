@@ -42,6 +42,7 @@ def extract_important_features(path):
                 minute_data[dt]["sys_swap_used_pct"] = metrics.get("swap_used.pct")
 
     final_features = []
+    time_stamps = []   
     for dt in sorted(minute_data.keys()):
         # print(dt) debugging
         features = minute_data[dt]
@@ -67,12 +68,13 @@ def extract_important_features(path):
                 features.get("sys_proc_count"),
                 features.get("sys_swap_used_pct")
             ]
+            time_stamps.append(dt)
             final_features.append(minute_array)
         except KeyError as e:
             print(f"Missing feature for datetime {dt}: {e}")
             continue
 
-    return final_features
+    return final_features, time_stamps
 
 # Execute
 # debugging aggregated_arrays = extract_important_features('./Test_Data/data-1786192670480.csv')
