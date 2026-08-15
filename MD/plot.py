@@ -3,7 +3,8 @@ import matplotlib.dates as mdates # Wichtig für die Formatierung der X-Achse
 import numpy as np
 from datetime import datetime
 from cleaning_utils import extract_important_features
-# Ich gehe davon aus, dass mahalanobis_distances eine Liste von Zahlen zurückgibt
+
+
 from method import mahalanobis_distances 
 
 def plot_distances(distances, time_strings):
