@@ -1,29 +1,23 @@
 import numpy as np
-from cleaning_utils import extract_important_features
+from cleaning_utils import extract_cpu_user_pct
 
-data, time = extract_important_features('./Test_Data/data-1786192670480.csv')
+cpu_user_pct = extract_cpu_user_pct('./Test_Data/data-1786192670480.csv')
 
 def ewma(data, alpha=0.3):
     if not data:
         return []
-
-    ewma_results = data[0]
-
+    ewma_results = []
+    ewma_results.append(data[0])
 
     for i in range(1, len(data)):
-        current_row = data[i]
-        prev_ewma_row = ewma_results[i - 1]
-        
-        smoothed_row = [
-            alpha * current_val + (1 - alpha) * prev_val
-            for current_val, prev_val in zip(current_row, prev_ewma_row) ]
-        
-        ewma_results.append(smoothed_row)
+        ewma_value = alpha * data[i] + (1 - alpha) * ewma_results[i - 1]
+        ewma_results.append(ewma_value)
+
 
     return ewma_results
 
 if __name__ == "__main__":
 
-    print(f"Original data[0:2]: {data[0:2]}")
-    values = ewma(data)
+    print(f"Original data[0:2]: {cpu_user_pct[0:2]}")
+    values = ewma(cpu_user_pct)
     print(f"EWMA values[0:2]: {values[0:2]}")  
