@@ -19,7 +19,7 @@ FEATURE_KEYS = {
 }
 
 
-def _extract_minute_data(path):
+def extract_minute_data(path):
     # Collect all module metrics grouped by minute timestamp.
     minute_data = defaultdict(dict)
 
@@ -42,60 +42,16 @@ def _extract_minute_data(path):
     return minute_data
 
 
-def extract_cpu_user_pct(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("cpu_user_pct") for dt in sorted(minute_data.keys()) if minute_data[dt].get("cpu_user_pct") is not None]
-
-
-def extract_cpu_system_pct(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("cpu_system_pct") for dt in sorted(minute_data.keys()) if minute_data[dt].get("cpu_system_pct") is not None]
-
-
-def extract_cpu_iowait_pct(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("cpu_iowait_pct") for dt in sorted(minute_data.keys()) if minute_data[dt].get("cpu_iowait_pct") is not None]
-
-
-def extract_cpu_switches(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("cpu_switches") for dt in sorted(minute_data.keys()) if minute_data[dt].get("cpu_switches") is not None]
-
-
-def extract_cpu_interrupts(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("cpu_interrupts") for dt in sorted(minute_data.keys()) if minute_data[dt].get("cpu_interrupts") is not None]
-
-
-def extract_mem_util_pct(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("mem_util_pct") for dt in sorted(minute_data.keys()) if minute_data[dt].get("mem_util_pct") is not None]
-
-
-def extract_mem_committed_as_kbytes(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("mem_committed_as_kbytes") for dt in sorted(minute_data.keys()) if minute_data[dt].get("mem_committed_as_kbytes") is not None]
-
-
-def extract_sys_load_avg_1(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("sys_load_avg_1") for dt in sorted(minute_data.keys()) if minute_data[dt].get("sys_load_avg_1") is not None]
-
-
-def extract_sys_load_avg_15(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("sys_load_avg_15") for dt in sorted(minute_data.keys()) if minute_data[dt].get("sys_load_avg_15") is not None]
-
-
-def extract_sys_proc_count(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("sys_proc_count") for dt in sorted(minute_data.keys()) if minute_data[dt].get("sys_proc_count") is not None]
-
-
-def extract_sys_swap_used_pct(path):
-    minute_data = _extract_minute_data(path)
-    return [minute_data[dt].get("sys_swap_used_pct") for dt in sorted(minute_data.keys()) if minute_data[dt].get("sys_swap_used_pct") is not None]
-
-# Execute
-# debugging aggregated_arrays = extract_important_features('./Test_Data/data-1786192670480.csv')
-# print(aggregated_arrays[0])
+def extract_all_features(path):
+    """Extract all features and return as a dict of lists."""
+    minute_data = extract_minute_data(path)
+    result = {}
+    
+    for feature_name in FEATURE_KEYS.keys():
+        result[feature_name] = [
+            minute_data[dt].get(feature_name) 
+            for dt in sorted(minute_data.keys()) 
+            if minute_data[dt].get(feature_name) is not None
+        ]
+    
+    return result
