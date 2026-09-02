@@ -33,7 +33,10 @@ def extract_minute_data(path):
             if not row["metrics"]:
                 continue
 
+
             metrics = json.loads(row["metrics"])
+            if metrics is None:
+                continue
 
             for feature_name, (expected_module, metric_key) in FEATURE_KEYS.items():
                 if module == expected_module:
@@ -43,15 +46,17 @@ def extract_minute_data(path):
 
 
 def extract_all_features(path):
-    """Extract all features and return as a dict of lists."""
+    """Extract all features and return as a dict of equal-length lists."""
     minute_data = extract_minute_data(path)
-    result = {}
-    
-    for feature_name in FEATURE_KEYS.keys():
-        result[feature_name] = [
-            minute_data[dt].get(feature_name) 
-            for dt in sorted(minute_data.keys()) 
-            if minute_data[dt].get(feature_name) is not None
-        ]
-    
-    return result
+    result = {feature_name: [] for feature_name in FEATURE_KEYS.keys()}
+    timestamps = []
+
+    for dt in sorted(minute_data.keys()):
+        # skip the whole minute if any feature is missing, so all lists stay aligned
+        if any(minute_data[dt].get(feature_name) is None for feature_name in FEATURE_KEYS.keys()):
+            continue
+        timestamps.append(dt)
+        for feature_name in FEATURE_KEYS.keys():
+            result[feature_name].append(minute_data[dt][feature_name])
+
+    return result, timestamps
