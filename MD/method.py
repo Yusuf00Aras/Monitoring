@@ -11,7 +11,7 @@ from db_utils import fetch_and_append
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'data-1786192670480.csv')
 
-THRESHOLD = 3.0       # Mahalanobis distance above which a minute is flagged
+THRESHOLD = 7.0       # Mahalanobis distance above which a minute is flagged
 POLL_INTERVAL = 60    # seconds between CSV checks
 WARMUP = 10          # minutes to collect before anomaly detection kicks in
 
