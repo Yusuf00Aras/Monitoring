@@ -13,7 +13,8 @@ DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'data-1786192670480.csv')
 
 THRESHOLD = 7.0       # Mahalanobis distance above which a minute is flagged
 POLL_INTERVAL = 60    # seconds between CSV checks
-WARMUP = 10          # minutes to collect before anomaly detection kicks in
+WARMUP = 100         # minutes to collect before anomaly detection kicks in
+                      # (needs to be well above #features for a stable covariance)
 
 # Database connection parameters for the AWS server.
 # Override via environment variables so secrets are not hard-coded.
@@ -181,14 +182,15 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
 
 
 if __name__ == "__main__":
-    distances = mahalanobis_distances(features)
-    print(distances[577]) 
-    
-
-    #++++++++++++++++++++++++++++++++++++++++++++++++#
-    # debugging print(distances[0]) # mahalanobis distance for the first minute and all the features pertaining to that minute
-    # debugging print(type(distances)) (np array)
-    # debugging print(distances[0:5]), distances is one dimensional array with length equal to the number of rows in features (minutes)
-    # debugging print("Mahalanobis distances:", len(distances)), number of minutes
+    # Only run the batch baseline check when the CSV actually has data.
+    # When starting fresh (empty CSV), skip it and go straight to the
+    # live monitor so it can build its baseline from DB data.
+    if features:
+        distances = mahalanobis_distances(features)
+        print(f"Baseline: {len(distances)} minutes, "
+              f"median distance={np.median(distances):.4f}, "
+              f"max distance={max(distances):.4f}")
+    else:
+        print("CSV is empty — starting fresh, baseline will be built from DB data.")
 
     run_monitor()
