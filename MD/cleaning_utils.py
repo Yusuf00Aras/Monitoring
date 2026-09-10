@@ -77,5 +77,5 @@ def extract_important_features(path):
     return final_features, time_stamps
 
 # Execute
-# debugging aggregated_arrays = extract_important_features('./Test_Data/data-1786192670480.csv')
+# debugging aggregated_arrays = extract_important_features('./Test_Data/raw_data.csv')
 # print(aggregated_arrays[0])

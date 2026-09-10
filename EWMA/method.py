@@ -8,7 +8,7 @@ from db_utils import fetch_and_append
 # Resolve the CSV path relative to this file so the script works no matter
 # what the current working directory is (important on the server).
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'data-1786192670480.csv')
+DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'raw_data.csv')
 ALPHA = 0.3
 # how many standard deviations a value may be away from the EWMA before it is flagged
 THRESHOLD = 3.0

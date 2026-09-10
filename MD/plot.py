@@ -47,7 +47,7 @@ def plot_distances(distances, time_strings):
     plt.show()
 
 if __name__ == "__main__":
-    features, time_stamps = extract_important_features('./Test_Data/data-1786192670480.csv')
+    features, time_stamps = extract_important_features('./Test_Data/raw_data.csv')
     
     # Falls mahalanobis_distances in method.py noch Tupel zurückgibt, 
     # musst du hier nur die Distanzen extrahieren!
