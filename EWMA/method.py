@@ -129,7 +129,7 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
             try:
                 n = fetch_and_append(conn_params, data_path)
                 if n:
-                    print(f"  fetched {n} row(s) from DB")
+                    print(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
             except Exception as e:
                 print(f"  DB fetch failed: {e}")
 
