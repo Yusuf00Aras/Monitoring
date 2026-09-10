@@ -30,9 +30,9 @@ DB_CONN_PARAMS = {
 USE_DB = True
 
 
-features, time = extract_important_features(DATA_PATH)
-# debugging print(time[0])
-# debugging print(len(features), len(time))
+features, timestamps = extract_important_features(DATA_PATH)
+# debugging print(timestamps[0])
+# debugging print(len(features), len(timestamps))
 # debugging print(np.shape(features)), np.array with 1439 rows and 11 columns, each row is a minute
 
 
