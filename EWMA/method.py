@@ -151,6 +151,8 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
                         f"ewma={monitors[name].ewma:.4f} "
                         f"distance={distance:.2f} std devs"
                     )
+                    with open("anomalies.csv", "a") as f:
+                        f.write(f"{ts},{name}: value={value:.4f}, ewma={monitors[name].ewma:.4f}, distance={distance:.2f} std devs\n")
 
         # wait until the next minute
         time.sleep(poll_interval)

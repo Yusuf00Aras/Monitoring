@@ -176,6 +176,8 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
                     f"[{ts}] ANOMALY  Mahalanobis distance={dist:.4f} "
                     f"(threshold={threshold})"
                 )
+                with open("anomalies.csv", "a") as f:
+                    f.write(f"{ts},{dist:.4f}\n")
 
         # wait until the next minute
         time.sleep(poll_interval)
