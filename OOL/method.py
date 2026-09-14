@@ -1,3 +1,14 @@
+"""Out-of-Limit (OOL) anomaly detection method.
+
+The OOL method is the simplest threshold-based approach: a fixed upper
+and lower limit is derived from a baseline window (typically mean ± k
+standard deviations) and every value outside those limits is flagged
+as an anomaly.  It does not adapt over time, which is exactly the weak
+point the EWMA and MD methods are meant to address.
+
+This module mirrors the structure of EWMA/method.py and MD/method.py so
+that all three can be loaded and compared by the evaluation framework.
+"""
 import os
 import time
 import numpy as np
@@ -7,7 +18,6 @@ from db_utils import fetch_and_append
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'raw_data.csv')
 
-ALPHA = 0.3
 THRESHOLD = 3.0
 POLL_INTERVAL = 60
 WARMUP = 10
@@ -24,59 +34,59 @@ USE_DB = True
 
 
 ######
-# EWMA state: {ewma, variance, n}
+# OOL state: {n, mean, m2, frozen_mean, frozen_std}
 ######
 
-def ewma_init(alpha=ALPHA, threshold=THRESHOLD, warmup=WARMUP):
-    return {'alpha': alpha, 'threshold': threshold, 'warmup': warmup,
-            'ewma': None, 'variance': None, 'n': 0}
+def ool_init(threshold=THRESHOLD, warmup=WARMUP):
+    return {'threshold': threshold, 'warmup': warmup,
+            'n': 0, 'mean': 0.0, 'm2': 0.0,
+            'frozen_mean': None, 'frozen_std': None}
 
 
 ######
-# Feed one value, return (state, is_anomaly, distance)
+# Feed one value, return (state, is_anomaly, distance). Limits freeze at warmup end.
 ######
 
-def ewma_update(state, value):
+def ool_update(state, value):
     value = float(value)
-    alpha = state['alpha']
     threshold = state['threshold']
     warmup = state['warmup']
 
-    if state['ewma'] is None:
-        state['ewma'] = value
-        state['variance'] = 0.0
-        state['n'] = 1
+    state['n'] += 1
+    delta = value - state['mean']
+    state['mean'] += delta / state['n']
+    delta2 = value - state['mean']
+    state['m2'] += delta * delta2
+
+    if state['n'] == warmup:
+        state['frozen_mean'] = state['mean']
+        state['frozen_std'] = np.sqrt(state['m2'] / (state['n'] - 1)) if state['n'] > 1 else 0.0
+
+    if state['n'] <= warmup or state['frozen_std'] is None or state['frozen_std'] == 0:
         return state, False, 0.0
 
-    state['ewma'] = alpha * value + (1 - alpha) * state['ewma']
-    residual = value - state['ewma']
-    std = np.sqrt(state['variance']) if state['variance'] > 0 else 0.0
-    distance = abs(residual) / std if std > 0 else 0.0
-
-    state['n'] += 1
-    delta = residual - (residual / state['n'])
-    state['variance'] += delta * residual / state['n']
-
-    is_anomaly = state['n'] > warmup and distance > threshold
+    distance = abs(value - state['frozen_mean']) / state['frozen_std']
+    is_anomaly = distance > threshold
     return state, is_anomaly, distance
 
 
 ######
-# Batch mode: run EWMA on a full dataset, return list of anomaly dicts
+# Batch mode: run OOL on a full dataset, return list of anomaly dicts
 ######
 
-def run_batch(features, timestamps, alpha=ALPHA, threshold=THRESHOLD, warmup=WARMUP):
+def run_batch(features, timestamps, threshold=THRESHOLD, warmup=WARMUP):
     anomalies = []
     for name, values in features.items():
-        state = ewma_init(alpha, threshold, warmup)
+        state = ool_init(threshold, warmup)
         for i, value in enumerate(values):
-            state, is_anomaly, distance = ewma_update(state, value)
+            state, is_anomaly, distance = ool_update(state, value)
             if is_anomaly:
                 anomalies.append({
                     'timestamp': timestamps[i],
                     'feature': name,
                     'value': float(value),
-                    'ewma': state['ewma'],
+                    'mean': state['frozen_mean'],
+                    'std': state['frozen_std'],
                     'distance': distance,
                 })
     return anomalies
@@ -86,15 +96,15 @@ def run_batch(features, timestamps, alpha=ALPHA, threshold=THRESHOLD, warmup=WAR
 # Live monitor: poll CSV every minute, flag anomalies on new rows
 ######
 
-def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
+def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
                 poll_interval=POLL_INTERVAL, use_db=USE_DB,
                 conn_params=DB_CONN_PARAMS):
     features, _ = extract_all_features(data_path)
-    states = {name: ewma_init(alpha, threshold) for name in features.keys()}
+    states = {name: ool_init(threshold) for name in features.keys()}
     seen = set()
 
-    print(f"Starting EWMA monitor on {data_path}")
-    print(f"alpha={alpha}, threshold={threshold}, poll={poll_interval}s")
+    print(f"Starting OOL monitor on {data_path}")
+    print(f"threshold={threshold}, poll={poll_interval}s")
     if use_db:
         print(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
     print("Waiting for new minute data...\n")
@@ -116,13 +126,16 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
             seen.add(ts)
             for name, values in current_features.items():
                 value = values[i]
-                states[name], is_anomaly, distance = ewma_update(states[name], value)
+                states[name], is_anomaly, distance = ool_update(states[name], value)
                 if is_anomaly:
+                    fm = states[name]['frozen_mean']
+                    fs = states[name]['frozen_std']
                     print(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
-                          f"ewma={states[name]['ewma']:.4f} distance={distance:.2f}")
+                          f"limit={fm:.4f} ± {threshold * fs:.4f} "
+                          f"distance={distance:.2f}")
                     with open("anomalies.csv", "a", encoding="utf-8") as f:
                         f.write(f"{ts},{name}: value={value:.4f}, "
-                                f"ewma={states[name]['ewma']:.4f}, "
+                                f"limit={fm:.4f} ± {threshold * fs:.4f}, "
                                 f"distance={distance:.2f}\n")
 
         time.sleep(poll_interval)

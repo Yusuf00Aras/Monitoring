@@ -1,0 +1,4 @@
+method,total_injections,detected_count,detection_rate,mean_delay_minutes,false_alarms,false_alarm_rate_per_hour
+EWMA,3,0,0.0000,,2,0.1667
+MD,3,0,0.0000,,0,0.0000
+OOL,3,0,0.0000,,135,11.2500

@@ -1,0 +1,10 @@
+method,scenario,feature,detected,delay_minutes,description
+EWMA,spike,cpu_user_pct,False,,spike +5.0std for 5 min
+EWMA,drift,mem_util_pct,True,1,drift +5.0std over 60 min (held after)
+EWMA,correlation_break,multi,False,,correlation break cpu_user_pct up / sys_load_avg_1 down for 30 min
+MD,spike,cpu_user_pct,False,,spike +5.0std for 5 min
+MD,drift,mem_util_pct,True,1,drift +5.0std over 60 min (held after)
+MD,correlation_break,multi,False,,correlation break cpu_user_pct up / sys_load_avg_1 down for 30 min
+OOL,spike,cpu_user_pct,True,0,spike +5.0std for 5 min
+OOL,drift,mem_util_pct,True,0,drift +5.0std over 60 min (held after)
+OOL,correlation_break,multi,True,0,correlation break cpu_user_pct up / sys_load_avg_1 down for 30 min

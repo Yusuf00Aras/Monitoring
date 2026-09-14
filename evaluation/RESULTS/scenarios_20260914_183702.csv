@@ -1,0 +1,3 @@
+method,scenario,feature,detected,delay_minutes,description
+EWMA,spike,cpu_user_pct,False,,spike +5.0std for 5 min
+EWMA,drift,mem_util_pct,True,1,drift +5.0std over 60 min (held after)
