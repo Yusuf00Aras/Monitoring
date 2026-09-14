@@ -11,12 +11,24 @@ that all three can be loaded and compared by the evaluation framework.
 """
 import os
 import time
+import logging
 import numpy as np
 from cleaning_utils import extract_all_features
 from db_utils import fetch_and_append
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'raw_data.csv')
+LOG_PATH = os.path.join(_BASE_DIR, 'monitor.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s  %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(LOG_PATH),
+        logging.StreamHandler(),
+    ],
+)
 
 THRESHOLD = 3.0
 POLL_INTERVAL = 60
@@ -103,20 +115,20 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
     states = {name: ool_init(threshold) for name in features.keys()}
     seen = set()
 
-    print(f"Starting OOL monitor on {data_path}")
-    print(f"threshold={threshold}, poll={poll_interval}s")
+    logging.info(f"Starting OOL monitor on {data_path}")
+    logging.info(f"threshold={threshold}, poll={poll_interval}s")
     if use_db:
-        print(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
-    print("Waiting for new minute data...\n")
+        logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
+    logging.info("Waiting for new minute data...")
 
     while True:
         if use_db:
             try:
                 n = fetch_and_append(conn_params, data_path)
                 if n:
-                    print(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logging.info(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
             except Exception as e:
-                print(f"  DB fetch failed: {e}")
+                logging.error(f"  DB fetch failed: {e}")
 
         current_features, current_timestamps = extract_all_features(data_path)
 
@@ -130,9 +142,9 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
                 if is_anomaly:
                     fm = states[name]['frozen_mean']
                     fs = states[name]['frozen_std']
-                    print(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
-                          f"limit={fm:.4f} ± {threshold * fs:.4f} "
-                          f"distance={distance:.2f}")
+                    logging.warning(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
+                                    f"limit={fm:.4f} ± {threshold * fs:.4f} "
+                                    f"distance={distance:.2f}")
                     with open("anomalies.csv", "a", encoding="utf-8") as f:
                         f.write(f"{ts},{name}: value={value:.4f}, "
                                 f"limit={fm:.4f} ± {threshold * fs:.4f}, "

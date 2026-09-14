@@ -1,5 +1,6 @@
 import os
 import time
+import logging
 from scipy.spatial import distance
 import numpy as np
 from cleaning_utils import extract_important_features
@@ -8,6 +9,17 @@ from db_utils import fetch_and_append
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'raw_data.csv')
+LOG_PATH = os.path.join(_BASE_DIR, 'monitor.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s  %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(LOG_PATH),
+        logging.StreamHandler(),
+    ],
+)
 
 THRESHOLD = 7.0
 POLL_INTERVAL = 60
@@ -119,20 +131,20 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
     state = md_init(threshold)
     seen = set()
 
-    print(f"Starting Mahalanobis monitor on {data_path}")
-    print(f"threshold={threshold}, poll={poll_interval}s, warmup={state['warmup']}")
+    logging.info(f"Starting Mahalanobis monitor on {data_path}")
+    logging.info(f"threshold={threshold}, poll={poll_interval}s, warmup={state['warmup']}")
     if use_db:
-        print(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
-    print("Waiting for new minute data...\n")
+        logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
+    logging.info("Waiting for new minute data...")
 
     while True:
         if use_db:
             try:
                 n = fetch_and_append(conn_params, data_path)
                 if n:
-                    print(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logging.info(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
             except Exception as e:
-                print(f"  DB fetch failed: {e}")
+                logging.error(f"  DB fetch failed: {e}")
 
         current_features, current_timestamps = extract_important_features(data_path)
 
@@ -142,8 +154,8 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
             seen.add(ts)
             state, is_anomaly, dist = md_update(state, current_features[i])
             if is_anomaly:
-                print(f"[{ts}] ANOMALY  Mahalanobis distance={dist:.4f} "
-                      f"(threshold={threshold})")
+                logging.warning(f"[{ts}] ANOMALY  Mahalanobis distance={dist:.4f} "
+                                f"(threshold={threshold})")
                 with open("anomalies.csv", "a", encoding="utf-8") as f:
                     f.write(f"{ts},{dist:.4f}\n")
 
@@ -154,9 +166,9 @@ if __name__ == "__main__":
     features, timestamps = extract_important_features(DATA_PATH)
     if features:
         distances = mahalanobis_distances(features)
-        print(f"Baseline: {len(distances)} minutes, "
-              f"median distance={np.median(distances):.4f}, "
-              f"max distance={max(distances):.4f}")
+        logging.info(f"Baseline: {len(distances)} minutes, "
+                     f"median distance={np.median(distances):.4f}, "
+                     f"max distance={max(distances):.4f}")
     else:
-        print("CSV is empty — starting fresh, baseline will be built from DB data.")
+        logging.info("CSV is empty — starting fresh, baseline will be built from DB data.")
     run_monitor()

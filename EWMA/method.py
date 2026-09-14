@@ -1,11 +1,23 @@
 import os
 import time
+import logging
 import numpy as np
 from cleaning_utils import extract_all_features
 from db_utils import fetch_and_append
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(_BASE_DIR, '..', 'Test_Data', 'raw_data.csv')
+LOG_PATH = os.path.join(_BASE_DIR, 'monitor.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s  %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(LOG_PATH),
+        logging.StreamHandler(),
+    ],
+)
 
 ALPHA = 0.3
 THRESHOLD = 3.0
@@ -93,20 +105,20 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
     states = {name: ewma_init(alpha, threshold) for name in features.keys()}
     seen = set()
 
-    print(f"Starting EWMA monitor on {data_path}")
-    print(f"alpha={alpha}, threshold={threshold}, poll={poll_interval}s")
+    logging.info(f"Starting EWMA monitor on {data_path}")
+    logging.info(f"alpha={alpha}, threshold={threshold}, poll={poll_interval}s")
     if use_db:
-        print(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
-    print("Waiting for new minute data...\n")
+        logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
+    logging.info("Waiting for new minute data...")
 
     while True:
         if use_db:
             try:
                 n = fetch_and_append(conn_params, data_path)
                 if n:
-                    print(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logging.info(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
             except Exception as e:
-                print(f"  DB fetch failed: {e}")
+                logging.error(f"  DB fetch failed: {e}")
 
         current_features, current_timestamps = extract_all_features(data_path)
 
@@ -118,8 +130,8 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
                 value = values[i]
                 states[name], is_anomaly, distance = ewma_update(states[name], value)
                 if is_anomaly:
-                    print(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
-                          f"ewma={states[name]['ewma']:.4f} distance={distance:.2f}")
+                    logging.warning(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
+                                    f"ewma={states[name]['ewma']:.4f} distance={distance:.2f}")
                     with open("anomalies.csv", "a", encoding="utf-8") as f:
                         f.write(f"{ts},{name}: value={value:.4f}, "
                                 f"ewma={states[name]['ewma']:.4f}, "
