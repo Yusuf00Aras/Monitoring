@@ -23,7 +23,7 @@ logging.basicConfig(
 
 THRESHOLD = 12.0
 POLL_INTERVAL = 60
-WARMUP = 100
+WARMUP = 60
 
 # Feature names in the exact order produced by extract_important_features()
 FEATURE_NAMES = [

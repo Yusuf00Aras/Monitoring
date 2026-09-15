@@ -89,19 +89,11 @@ def calibrate_ewma(features, timestamps, target_false_alarms=0,
 
 ######
 # Calibrate the OOL threshold on a clean baseline window
+# OOL now uses static limits (90%) — no calibration needed, return a dummy value.
 ######
 
-def calibrate_ool(features, timestamps, target_false_alarms=0,
-                  warmup=None, **kwargs):
-    mod = _import_method_module("OOL")
-    if warmup is None:
-        warmup = mod.WARMUP
-
-    def run_fn(threshold, features, timestamps):
-        return mod.run_batch(features, timestamps, threshold=threshold, warmup=warmup)
-
-    return calibrate_threshold(run_fn, features, timestamps,
-                               target_false_alarms, **kwargs)
+def calibrate_ool(features, timestamps, target_false_alarms=0, **kwargs):
+    return 90.0
 
 
 ######

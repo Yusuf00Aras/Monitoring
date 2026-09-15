@@ -1,13 +1,9 @@
 """Out-of-Limit (OOL) anomaly detection method.
 
-The OOL method is the simplest threshold-based approach: a fixed upper
-and lower limit is derived from a baseline window (typically mean ± k
-standard deviations) and every value outside those limits is flagged
-as an anomaly.  It does not adapt over time, which is exactly the weak
-point the EWMA and MD methods are meant to address.
-
-This module mirrors the structure of EWMA/method.py and MD/method.py so
-that all three can be loaded and compared by the evaluation framework.
+The OOL method uses a simple static threshold: if a metric stays above
+a fixed limit (e.g. 90% utilization) for a sustained number of minutes,
+it is flagged as an anomaly.  No baseline calculation, no mean/std —
+just a hard limit with a duration requirement.
 """
 import os
 import time
@@ -30,14 +26,21 @@ logging.basicConfig(
     ],
 )
 
-THRESHOLD = 3.0
 POLL_INTERVAL = 60
-WARMUP = 10
 
-# An anomaly is only flagged after the value stays above 90% of the upper
-# limit for this many consecutive minutes.
+# Static limits per feature. Only percentage-based features get a 90% limit;
+# non-percentage features are skipped (no static threshold makes sense).
+STATIC_LIMITS = {
+    "cpu_user_pct": 90.0,
+    "cpu_system_pct": 90.0,
+    "cpu_iowait_pct": 90.0,
+    "mem_util_pct": 90.0,
+    "sys_swap_used_pct": 90.0,
+}
+
+# An anomaly is flagged after the value stays above the static limit
+# for this many consecutive minutes.
 SUSTAINED_MINUTES = 5
-SUSTAINED_PCT = 0.90
 
 DB_CONN_PARAMS = {
     'host': os.environ.get('DB_HOST', 'localhost'),
@@ -51,50 +54,26 @@ USE_DB = True
 
 
 ######
-# OOL state: {n, mean, m2, frozen_mean, frozen_std, consecutive, alerted}
+# OOL state: {limit, consecutive, alerted}
 ######
 
-def ool_init(threshold=THRESHOLD, warmup=WARMUP,
-             sustained_minutes=SUSTAINED_MINUTES, sustained_pct=SUSTAINED_PCT):
-    return {'threshold': threshold, 'warmup': warmup,
-            'sustained_minutes': sustained_minutes,
-            'sustained_pct': sustained_pct,
-            'n': 0, 'mean': 0.0, 'm2': 0.0,
-            'frozen_mean': None, 'frozen_std': None,
+def ool_init(limit, sustained_minutes=SUSTAINED_MINUTES):
+    return {'limit': limit, 'sustained_minutes': sustained_minutes,
             'consecutive': 0, 'alerted': False}
 
 
 ######
-# Feed one value, return (state, is_anomaly, distance). Limits freeze at warmup end.
-# An anomaly is flagged only after the value stays above sustained_pct of the
-# upper limit for sustained_minutes consecutive minutes.
+# Feed one value, return (state, is_anomaly, distance).
+# An anomaly is flagged after the value stays above the static limit
+# for sustained_minutes consecutive minutes.
 ######
 
 def ool_update(state, value):
     value = float(value)
-    threshold = state['threshold']
-    warmup = state['warmup']
+    limit = state['limit']
     sustained_minutes = state['sustained_minutes']
-    sustained_pct = state['sustained_pct']
 
-    state['n'] += 1
-    delta = value - state['mean']
-    state['mean'] += delta / state['n']
-    delta2 = value - state['mean']
-    state['m2'] += delta * delta2
-
-    if state['n'] == warmup:
-        state['frozen_mean'] = state['mean']
-        state['frozen_std'] = np.sqrt(state['m2'] / (state['n'] - 1)) if state['n'] > 1 else 0.0
-
-    if state['n'] <= warmup or state['frozen_std'] is None or state['frozen_std'] == 0:
-        return state, False, 0.0
-
-    upper_limit = state['frozen_mean'] + threshold * state['frozen_std']
-    upper_trigger = sustained_pct * upper_limit
-    distance = abs(value - state['frozen_mean']) / state['frozen_std']
-
-    if value > upper_trigger:
+    if value > limit:
         state['consecutive'] += 1
     else:
         state['consecutive'] = 0
@@ -105,6 +84,7 @@ def ool_update(state, value):
         is_anomaly = True
         state['alerted'] = True
 
+    distance = value - limit
     return state, is_anomaly, distance
 
 
@@ -112,11 +92,12 @@ def ool_update(state, value):
 # Batch mode: run OOL on a full dataset, return list of anomaly dicts
 ######
 
-def run_batch(features, timestamps, threshold=THRESHOLD, warmup=WARMUP,
-              sustained_minutes=SUSTAINED_MINUTES, sustained_pct=SUSTAINED_PCT):
+def run_batch(features, timestamps, sustained_minutes=SUSTAINED_MINUTES):
     anomalies = []
     for name, values in features.items():
-        state = ool_init(threshold, warmup, sustained_minutes, sustained_pct)
+        if name not in STATIC_LIMITS:
+            continue
+        state = ool_init(STATIC_LIMITS[name], sustained_minutes)
         for i, value in enumerate(values):
             state, is_anomaly, distance = ool_update(state, value)
             if is_anomaly:
@@ -127,8 +108,7 @@ def run_batch(features, timestamps, threshold=THRESHOLD, warmup=WARMUP,
                     'timestamp': timestamps[i],
                     'feature': name,
                     'value': float(value),
-                    'mean': state['frozen_mean'],
-                    'std': state['frozen_std'],
+                    'limit': state['limit'],
                     'distance': distance,
                     'consecutive_minutes': state['consecutive'],
                     'metrics': metrics_at_time,
@@ -140,13 +120,14 @@ def run_batch(features, timestamps, threshold=THRESHOLD, warmup=WARMUP,
 # Live monitor: poll CSV every minute, flag anomalies on new rows
 ######
 
-def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
+def run_monitor(data_path=DATA_PATH,
                 poll_interval=POLL_INTERVAL, use_db=USE_DB,
                 conn_params=DB_CONN_PARAMS,
-                sustained_minutes=SUSTAINED_MINUTES, sustained_pct=SUSTAINED_PCT):
+                sustained_minutes=SUSTAINED_MINUTES):
     features, _ = extract_all_features(data_path)
-    states = {name: ool_init(threshold, WARMUP, sustained_minutes, sustained_pct)
-              for name in features.keys()}
+    # Only monitor features that have a static limit defined
+    states = {name: ool_init(STATIC_LIMITS[name], sustained_minutes)
+              for name in features.keys() if name in STATIC_LIMITS}
     seen = set()
 
     # Create a fresh anomalies CSV (with timestamp in the name) so old runs stay untouched
@@ -158,8 +139,8 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
     logging.info(f"Anomalies will be written to {anomalies_path}")
 
     logging.info(f"Starting OOL monitor on {data_path}")
-    logging.info(f"threshold={threshold}, poll={poll_interval}s, "
-                 f"sustained={sustained_minutes}min over {sustained_pct:.0%} of upper limit")
+    logging.info(f"static limits={STATIC_LIMITS}, poll={poll_interval}s, "
+                 f"sustained={sustained_minutes}min")
     if use_db:
         logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
     logging.info("Waiting for new minute data...")
@@ -180,23 +161,22 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
                 continue
             seen.add(ts)
             for name, values in current_features.items():
+                if name not in states:
+                    continue
                 value = values[i]
                 states[name], is_anomaly, distance = ool_update(states[name], value)
                 if is_anomaly:
-                    fm = states[name]['frozen_mean']
-                    fs = states[name]['frozen_std']
-                    upper_limit = fm + threshold * fs
+                    limit = states[name]['limit']
                     # Collect all metrics at the anomaly timestamp
                     metrics_at_time = {feat: float(feat_values[i])
                                        for feat, feat_values in current_features.items()}
                     logging.warning(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
-                                    f"limit={fm:.4f} ± {threshold * fs:.4f} "
+                                    f"limit={limit:.1f}% "
                                     f"(sustained {states[name]['consecutive']} min "
-                                    f"over {sustained_pct:.0%} of {upper_limit:.4f}) "
-                                    f"distance={distance:.2f}")
+                                    f"over {limit:.1f}%)")
                     with open(anomalies_path, "a", encoding="utf-8") as f:
                         f.write(f"{ts},{name}: value={value:.4f}, "
-                                f"limit={fm:.4f} ± {threshold * fs:.4f}, "
+                                f"limit={limit:.1f}%, "
                                 f"sustained={states[name]['consecutive']}min, "
                                 f"distance={distance:.2f}, "
                                 f"metrics={metrics_at_time}\n")

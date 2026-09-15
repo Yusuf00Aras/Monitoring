@@ -22,7 +22,7 @@ logging.basicConfig(
 ALPHA = 0.3
 THRESHOLD = 4.5
 POLL_INTERVAL = 60
-WARMUP = 10
+WARMUP = 60
 
 DB_CONN_PARAMS = {
     'host': os.environ.get('DB_HOST', 'localhost'),
@@ -118,7 +118,7 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
     logging.info(f"Anomalies will be written to {anomalies_path}")
 
     logging.info(f"Starting EWMA monitor on {data_path}")
-    logging.info(f"alpha={alpha}, threshold={threshold}, poll={poll_interval}s")
+    logging.info(f"alpha={alpha}, threshold={threshold}, poll={poll_interval}s, warmup={WARMUP}")
     if use_db:
         logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
     logging.info("Waiting for new minute data...")

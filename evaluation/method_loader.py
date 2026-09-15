@@ -55,10 +55,13 @@ def run_method(method, dict_features, timestamps, threshold=None, **kwargs):
     method = method.upper()
     mod = _import_method_module(method)
 
-    if method in ("EWMA", "OOL"):
+    if method == "EWMA":
         return mod.run_batch(dict_features, timestamps,
                              threshold=threshold if threshold is not None else 3.0,
                              **kwargs)
+    elif method == "OOL":
+        # OOL uses static limits — threshold is not used, but accepted for interface compatibility
+        return mod.run_batch(dict_features, timestamps, **kwargs)
     elif method == "MD":
         from injection import dict_to_vector_layout
         vectors, ts = dict_to_vector_layout(dict_features, timestamps)
