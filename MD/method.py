@@ -21,9 +21,24 @@ logging.basicConfig(
     ],
 )
 
-THRESHOLD = 7.0
+THRESHOLD = 12.0
 POLL_INTERVAL = 60
 WARMUP = 100
+
+# Feature names in the exact order produced by extract_important_features()
+FEATURE_NAMES = [
+    "cpu_user_pct",
+    "cpu_system_pct",
+    "cpu_iowait_pct",
+    "cpu_switches",
+    "cpu_interrupts",
+    "mem_util_pct",
+    "mem_committed_as_kbytes",
+    "sys_load_avg_1",
+    "sys_load_avg_15",
+    "sys_proc_count",
+    "sys_swap_used_pct",
+]
 
 DB_CONN_PARAMS = {
     'host': os.environ.get('DB_HOST', 'localhost'),
@@ -117,7 +132,14 @@ def run_batch(features, timestamps, threshold=THRESHOLD, warmup=WARMUP, regulato
     for i, x in enumerate(features):
         state, is_anomaly, dist = md_update(state, x)
         if is_anomaly:
-            anomalies.append({'timestamp': timestamps[i], 'distance': dist})
+            # Collect all metrics at the anomaly timestamp
+            metrics_at_time = {name: float(x[j]) for j, name in enumerate(FEATURE_NAMES)
+                               if j < len(x)}
+            anomalies.append({
+                'timestamp': timestamps[i],
+                'distance': dist,
+                'metrics': metrics_at_time,
+            })
     return anomalies
 
 
@@ -154,10 +176,14 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
             seen.add(ts)
             state, is_anomaly, dist = md_update(state, current_features[i])
             if is_anomaly:
+                # Collect all metrics at the anomaly timestamp
+                x = current_features[i]
+                metrics_at_time = {name: float(x[j]) for j, name in enumerate(FEATURE_NAMES)
+                                   if j < len(x)}
                 logging.warning(f"[{ts}] ANOMALY  Mahalanobis distance={dist:.4f} "
                                 f"(threshold={threshold})")
                 with open("anomalies.csv", "a", encoding="utf-8") as f:
-                    f.write(f"{ts},{dist:.4f}\n")
+                    f.write(f"{ts},{dist:.4f}, metrics={metrics_at_time}\n")
 
         time.sleep(poll_interval)
 

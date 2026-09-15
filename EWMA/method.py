@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 
 ALPHA = 0.3
-THRESHOLD = 3.0
+THRESHOLD = 4.5
 POLL_INTERVAL = 60
 WARMUP = 10
 
@@ -84,12 +84,16 @@ def run_batch(features, timestamps, alpha=ALPHA, threshold=THRESHOLD, warmup=WAR
         for i, value in enumerate(values):
             state, is_anomaly, distance = ewma_update(state, value)
             if is_anomaly:
+                # Collect all metrics at the anomaly timestamp
+                metrics_at_time = {feat: float(feat_values[i])
+                                   for feat, feat_values in features.items()}
                 anomalies.append({
                     'timestamp': timestamps[i],
                     'feature': name,
                     'value': float(value),
                     'ewma': state['ewma'],
                     'distance': distance,
+                    'metrics': metrics_at_time,
                 })
     return anomalies
 
@@ -130,12 +134,16 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
                 value = values[i]
                 states[name], is_anomaly, distance = ewma_update(states[name], value)
                 if is_anomaly:
+                    # Collect all metrics at the anomaly timestamp
+                    metrics_at_time = {feat: float(feat_values[i])
+                                       for feat, feat_values in current_features.items()}
                     logging.warning(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
                                     f"ewma={states[name]['ewma']:.4f} distance={distance:.2f}")
                     with open("anomalies.csv", "a", encoding="utf-8") as f:
                         f.write(f"{ts},{name}: value={value:.4f}, "
                                 f"ewma={states[name]['ewma']:.4f}, "
-                                f"distance={distance:.2f}\n")
+                                f"distance={distance:.2f}, "
+                                f"metrics={metrics_at_time}\n")
 
         time.sleep(poll_interval)
 
