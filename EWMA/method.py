@@ -109,6 +109,14 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
     states = {name: ewma_init(alpha, threshold) for name in features.keys()}
     seen = set()
 
+    # Create a fresh anomalies CSV (with timestamp in the name) so old runs stay untouched
+    anomalies_path = os.path.join(_BASE_DIR, 'ANOMALIES',
+                                 f"anomalies_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.makedirs(os.path.dirname(anomalies_path), exist_ok=True)
+    with open(anomalies_path, "w", encoding="utf-8") as f:
+        f.write("timestamp,feature,value,ewma,distance,metrics\n")
+    logging.info(f"Anomalies will be written to {anomalies_path}")
+
     logging.info(f"Starting EWMA monitor on {data_path}")
     logging.info(f"alpha={alpha}, threshold={threshold}, poll={poll_interval}s")
     if use_db:
@@ -139,7 +147,7 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
                                        for feat, feat_values in current_features.items()}
                     logging.warning(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
                                     f"ewma={states[name]['ewma']:.4f} distance={distance:.2f}")
-                    with open("anomalies.csv", "a", encoding="utf-8") as f:
+                    with open(anomalies_path, "a", encoding="utf-8") as f:
                         f.write(f"{ts},{name}: value={value:.4f}, "
                                 f"ewma={states[name]['ewma']:.4f}, "
                                 f"distance={distance:.2f}, "

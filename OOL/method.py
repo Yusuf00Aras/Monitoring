@@ -149,6 +149,14 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
               for name in features.keys()}
     seen = set()
 
+    # Create a fresh anomalies CSV (with timestamp in the name) so old runs stay untouched
+    anomalies_path = os.path.join(_BASE_DIR, 'ANOMALIES',
+                                 f"anomalies_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.makedirs(os.path.dirname(anomalies_path), exist_ok=True)
+    with open(anomalies_path, "w", encoding="utf-8") as f:
+        f.write("timestamp,feature,value,limit,sustained,distance,metrics\n")
+    logging.info(f"Anomalies will be written to {anomalies_path}")
+
     logging.info(f"Starting OOL monitor on {data_path}")
     logging.info(f"threshold={threshold}, poll={poll_interval}s, "
                  f"sustained={sustained_minutes}min over {sustained_pct:.0%} of upper limit")
@@ -186,7 +194,7 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
                                     f"(sustained {states[name]['consecutive']} min "
                                     f"over {sustained_pct:.0%} of {upper_limit:.4f}) "
                                     f"distance={distance:.2f}")
-                    with open("anomalies.csv", "a", encoding="utf-8") as f:
+                    with open(anomalies_path, "a", encoding="utf-8") as f:
                         f.write(f"{ts},{name}: value={value:.4f}, "
                                 f"limit={fm:.4f} ± {threshold * fs:.4f}, "
                                 f"sustained={states[name]['consecutive']}min, "
