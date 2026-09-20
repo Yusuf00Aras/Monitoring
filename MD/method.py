@@ -21,7 +21,9 @@ logging.basicConfig(
     ],
 )
 
-THRESHOLD = 12.0
+# 95th percentile of chi-square distribution with 11 degrees of freedom
+# (one per monitored feature). MD distance ~ chi2(df=11) under normality.
+THRESHOLD = 19.68
 POLL_INTERVAL = 60
 WARMUP = 60
 
@@ -35,7 +37,7 @@ FEATURE_NAMES = [
     "mem_util_pct",
     "mem_committed_as_kbytes",
     "sys_load_avg_1",
-    "sys_load_avg_15",
+    "sys_proc_running",
     "sys_proc_count",
     "sys_swap_used_pct",
 ]

@@ -14,7 +14,7 @@ SELECT
   
   -- System
   MAX((metrics->>'load_avg_1')::float)      FILTER (WHERE module = 'zbx_system') AS sys_load_avg_1,
-  MAX((metrics->>'load_avg_15')::float)     FILTER (WHERE module = 'zbx_system') AS sys_load_avg_15,
+  MAX((metrics->>'proc_running')::float)   FILTER (WHERE module = 'zbx_system') AS sys_proc_running,
   MAX((metrics->>'proc_count')::float)      FILTER (WHERE module = 'zbx_system') AS sys_proc_count,
   MAX((metrics->>'swap_used.pct')::float)   FILTER (WHERE module = 'zbx_system') AS sys_swap_used_pct
 

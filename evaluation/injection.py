@@ -225,7 +225,7 @@ MD_FEATURE_ORDER = [
     "mem_util_pct",
     "mem_committed_as_kbytes",
     "sys_load_avg_1",
-    "sys_load_avg_15",
+    "sys_proc_running",
     "sys_proc_count",
     "sys_swap_used_pct",
 ]

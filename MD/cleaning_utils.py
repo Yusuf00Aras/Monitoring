@@ -37,7 +37,7 @@ def extract_important_features(path):
             # adds relevant system metrics to the current minute's dictionary
             elif module == "zbx_system":
                 minute_data[dt]["sys_load_avg_1"] = metrics.get("load_avg_1")
-                minute_data[dt]["sys_load_avg_15"] = metrics.get("load_avg_15")
+                minute_data[dt]["sys_proc_running"] = metrics.get("proc_running")
                 minute_data[dt]["sys_proc_count"] = metrics.get("proc_count")
                 minute_data[dt]["sys_swap_used_pct"] = metrics.get("swap_used.pct")
 
@@ -52,7 +52,7 @@ def extract_important_features(path):
         # makes the handling easier later by making sure each value is a feature (important for mahalanobis distance)
         try:
             # skipping NaN values, if any of the features are missing for a minute, we skip that minute
-            if features.get("cpu_user_pct") is None or features.get("cpu_system_pct") is None or features.get("cpu_iowait_pct") is None or features.get("cpu_switches") is None or features.get("cpu_interrupts") is None or features.get("mem_util_pct") is None or features.get("mem_committed_as_kbytes") is None or features.get("sys_load_avg_1") is None or features.get("sys_load_avg_15") is None or features.get("sys_proc_count") is None or features.get("sys_swap_used_pct") is None:
+            if features.get("cpu_user_pct") is None or features.get("cpu_system_pct") is None or features.get("cpu_iowait_pct") is None or features.get("cpu_switches") is None or features.get("cpu_interrupts") is None or features.get("mem_util_pct") is None or features.get("mem_committed_as_kbytes") is None or features.get("sys_load_avg_1") is None or features.get("sys_proc_running") is None or features.get("sys_proc_count") is None or features.get("sys_swap_used_pct") is None:
                 print(f"Missing feature for datetime {dt}, skipping this minute.")
                 continue
             minute_array = [
@@ -64,7 +64,7 @@ def extract_important_features(path):
                 features.get("mem_util_pct"),
                 features.get("mem_committed_as_kbytes"),
                 features.get("sys_load_avg_1"),
-                features.get("sys_load_avg_15"),
+                features.get("sys_proc_running"),
                 features.get("sys_proc_count"),
                 features.get("sys_swap_used_pct")
             ]

@@ -13,7 +13,7 @@ FEATURE_KEYS = {
     "mem_util_pct": ("zbx_memory", "util.pct"),
     "mem_committed_as_kbytes": ("zbx_memory", "committed_as.kbytes"),
     "sys_load_avg_1": ("zbx_system", "load_avg_1"),
-    "sys_load_avg_15": ("zbx_system", "load_avg_15"),
+    "sys_proc_running": ("zbx_system", "proc_running"),
     "sys_proc_count": ("zbx_system", "proc_count"),
     "sys_swap_used_pct": ("zbx_system", "swap_used.pct"),
 }
