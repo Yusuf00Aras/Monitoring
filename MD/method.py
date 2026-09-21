@@ -155,13 +155,11 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
     state = md_init(threshold)
     seen = set()
 
-    # Create a fresh anomalies CSV (with timestamp in the name) so old runs stay untouched
-    anomalies_path = os.path.join(_BASE_DIR, 'ANOMALIES',
-                                 f"anomalies_{time.strftime('%Y%m%d_%H%M%S')}.csv")
-    os.makedirs(os.path.dirname(anomalies_path), exist_ok=True)
-    with open(anomalies_path, "w", encoding="utf-8") as f:
-        f.write("timestamp,distance,metrics\n")
-    logging.info(f"Anomalies will be written to {anomalies_path}")
+    # Anomalies are written to per-day CSV files (anomalies_YYYY-MM-DD.csv)
+    # so every day gets its own file for easier inspection.
+    anomalies_dir = os.path.join(_BASE_DIR, 'ANOMALIES')
+    os.makedirs(anomalies_dir, exist_ok=True)
+    logging.info(f"Anomalies will be written to {anomalies_dir}/anomalies_YYYY-MM-DD.csv")
 
     logging.info(f"Starting Mahalanobis monitor on {data_path}")
     logging.info(f"threshold={threshold}, poll={poll_interval}s, warmup={state['warmup']}")
@@ -192,7 +190,11 @@ def run_monitor(data_path=DATA_PATH, threshold=THRESHOLD,
                                    if j < len(x)}
                 logging.warning(f"[{ts}] ANOMALY  Mahalanobis distance={dist:.4f} "
                                 f"(threshold={threshold})")
-                with open(anomalies_path, "a", encoding="utf-8") as f:
+                daily_path = os.path.join(anomalies_dir, f"anomalies_{ts[:10]}.csv")
+                file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
+                with open(daily_path, "a", encoding="utf-8") as f:
+                    if not file_exists:
+                        f.write("timestamp,distance,metrics\n")
                     f.write(f"{ts},{dist:.4f}, metrics={metrics_at_time}\n")
 
         time.sleep(poll_interval)

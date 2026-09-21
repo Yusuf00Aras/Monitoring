@@ -62,8 +62,31 @@ def append_rows_to_csv(rows, csv_path):
             writer.writerow(row)
 
 
+def append_rows_to_daily_csv(rows, base_dir):
+    """Append rows to per-day CSV files (one per calendar day).
+
+    Each row is routed to raw_data_YYYY-MM-DD.csv based on its datetime,
+    so every day gets its own file for easier inspection.
+
+    rows: list of (datetime, module, tags, metrics) tuples.
+    base_dir: directory where the daily files are created.
+    """
+    for row in rows:
+        date_part = str(row[0])[:10]  # YYYY-MM-DD
+        daily_path = os.path.join(base_dir, f"raw_data_{date_part}.csv")
+        file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
+        with open(daily_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+            if not file_exists:
+                writer.writerow(CSV_COLUMNS)
+            writer.writerow(row)
+
+
 def fetch_and_append(conn_params, csv_path, sql_path=SQL_PATH):
     """Fetch the last minute from the DB and append it to the CSV.
+
+    Appends to both the main CSV (csv_path) and a per-day CSV file
+    in the same directory, so every day gets its own raw data file.
 
     Returns the number of rows appended (0 if nothing new).
     """
@@ -73,4 +96,5 @@ def fetch_and_append(conn_params, csv_path, sql_path=SQL_PATH):
         return 0
 
     append_rows_to_csv(rows, csv_path)
+    append_rows_to_daily_csv(rows, os.path.dirname(csv_path))
     return len(rows)

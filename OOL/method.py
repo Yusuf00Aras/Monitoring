@@ -130,13 +130,11 @@ def run_monitor(data_path=DATA_PATH,
               for name in features.keys() if name in STATIC_LIMITS}
     seen = set()
 
-    # Create a fresh anomalies CSV (with timestamp in the name) so old runs stay untouched
-    anomalies_path = os.path.join(_BASE_DIR, 'ANOMALIES',
-                                 f"anomalies_{time.strftime('%Y%m%d_%H%M%S')}.csv")
-    os.makedirs(os.path.dirname(anomalies_path), exist_ok=True)
-    with open(anomalies_path, "w", encoding="utf-8") as f:
-        f.write("timestamp,feature,value,limit,sustained,distance,metrics\n")
-    logging.info(f"Anomalies will be written to {anomalies_path}")
+    # Anomalies are written to per-day CSV files (anomalies_YYYY-MM-DD.csv)
+    # so every day gets its own file for easier inspection.
+    anomalies_dir = os.path.join(_BASE_DIR, 'ANOMALIES')
+    os.makedirs(anomalies_dir, exist_ok=True)
+    logging.info(f"Anomalies will be written to {anomalies_dir}/anomalies_YYYY-MM-DD.csv")
 
     logging.info(f"Starting OOL monitor on {data_path}")
     logging.info(f"static limits={STATIC_LIMITS}, poll={poll_interval}s, "
@@ -174,7 +172,11 @@ def run_monitor(data_path=DATA_PATH,
                                     f"limit={limit:.1f}% "
                                     f"(sustained {states[name]['consecutive']} min "
                                     f"over {limit:.1f}%)")
-                    with open(anomalies_path, "a", encoding="utf-8") as f:
+                    daily_path = os.path.join(anomalies_dir, f"anomalies_{ts[:10]}.csv")
+                    file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
+                    with open(daily_path, "a", encoding="utf-8") as f:
+                        if not file_exists:
+                            f.write("timestamp,feature,value,limit,sustained,distance,metrics\n")
                         f.write(f"{ts},{name}: value={value:.4f}, "
                                 f"limit={limit:.1f}%, "
                                 f"sustained={states[name]['consecutive']}min, "
