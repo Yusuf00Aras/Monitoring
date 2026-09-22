@@ -5,11 +5,11 @@ a clean baseline window (no injections) and counting the false alarms,
 we binary-search for the threshold that produces the desired false alarm
 rate. All three methods are then compared at that same rate.
 
-For MD, the same baseline window is used both to fit the frozen reference
-distribution and to score it (count false alarms) during calibration --
+For EWMA and MD, the same baseline window is used both to fit the frozen
+reference and to score it (count false alarms) during calibration --
 there are no injected anomalies in the baseline, so fitting and scoring
-on the same clean data is consistent with how MD is fit once for real
-evaluation runs too.
+on the same clean data is consistent with how both are fit once for real
+evaluation runs too. Alarms are counted per excursion for all methods.
 """
 from __future__ import annotations
 
@@ -78,19 +78,18 @@ def calibrate_threshold(run_fn, features, timestamps, target_false_alarms=0,
 ######
 
 def calibrate_ewma(features, timestamps, target_false_alarms=0,
-                   alpha=None, warmup=None, **kwargs):
+                   alpha=None, **kwargs):
     mod = _import_method_module("EWMA")
     if alpha is None:
         alpha = mod.ALPHA
-    if warmup is None:
-        warmup = mod.WARMUP
 
     def run_fn(threshold, features, timestamps):
-        return mod.run_batch(features, timestamps, alpha=alpha,
-                             threshold=threshold, warmup=warmup)
+        return mod.run_batch(features, features, timestamps, alpha=alpha,
+                             threshold=threshold)
 
     return calibrate_threshold(run_fn, features, timestamps,
-                               target_false_alarms, **kwargs)
+                               target_false_alarms,
+                               threshold_low=0.5, threshold_high=100.0, **kwargs)
 
 
 ######

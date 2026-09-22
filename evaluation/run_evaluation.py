@@ -4,23 +4,28 @@ Implements the full evaluation pipeline:
 
   1. Load telemetry data from one server (CSV).
   2. Split into a clean baseline window and an evaluation window.
-  3. Calibrate EWMA and MD to the same false alarm rate on baseline.
-     OOL is NOT calibrated -- its limits are static. The calibration
-     target is the number of alarms OOL produces on the baseline window,
-     so all three methods end up with the same baseline false alarm count.
+  3. Calibrate EWMA and MD to the same false alarm budget on baseline.
+     OOL is NOT calibrated -- its limits are static. The default budget
+     is 1 alarm on the baseline window: OOL's own baseline count (0) is
+     degenerate, because EWMA then only reaches it at the search ceiling
+     and goes blind. `--target-fa ool` still reproduces that setting.
   4. For each of `repetitions` randomized runs:
        - randomly pick injection positions inside the evaluation window
          (kept away from the edges by EDGE_MARGIN minutes),
-       - inject spike, drift and correlation-break,
+       - inject spike, drift and correlation-break, each into its own
+         copy of the eval window (one scenario per run, no overlap),
+         with magnitudes in multiples of the BASELINE std of the metric,
        - run EWMA, MD and OOL on baseline + injected eval,
        - score detections / false alarms against the ground-truth intervals.
+         Alarms the method also raises on the clean (un-injected) data
+         never count as detections (see metrics.evaluate).
   5. Aggregate the per-run results into mean +/- std across repetitions.
   6. Print a comparison report and save it to CSV.
 
 Usage
 -----
     python evaluation/run_evaluation.py [--data PATH] [--baseline-ratio 0.5]
-            [--repetitions 30] [--seed 42] [--target-fa ool]
+            [--repetitions 30] [--seed 42] [--target-fa 1]
 """
 from __future__ import annotations
 
@@ -65,69 +70,82 @@ SCENARIO_INJECTORS = {
 SCENARIO_FEATURES = {
     "spike": ["cpu_user_pct"],
     "drift": ["mem_util_pct"],
-    "correlation_break": ["multi"],
+    "correlation_break": ["cpu_user_pct", "sys_load_avg_1"],
 }
 
 # Keep injection start points at least this many minutes from the
 # edges of the evaluation window so the anomaly has room to develop.
 EDGE_MARGIN = 30
 
+# Minutes the drift is held at its full offset after the ramp. The drift's
+# detection interval is ramp + hold, so every run is judged over the same
+# length of time.
+DRIFT_HOLD = 60
+
 
 ######
-# Run one repetition: inject all three scenarios at randomized positions,
-# run every method, return {method: {scenario: report}}.
+# Run every method once on data, return {method: raw anomaly list}.
 ######
 
-def _run(split, thresholds, positions, cfg):
+def _run_all_methods(split, full_features, full_timestamps, thresholds):
+    raws = {}
+    for method in list_methods():
+        kwargs = {}
+        if method in ("EWMA", "MD"):
+            kwargs = {'baseline_features': split['baseline_features'],
+                      'baseline_timestamps': split['baseline_timestamps']}
+        raws[method] = run_method(method, full_features, full_timestamps,
+                                  threshold=thresholds.get(method), **kwargs)
+    return raws
+
+
+######
+# Scenario length in minutes (used to keep injections inside the window).
+######
+
+def _span(params):
+    return params.get("duration", 30) + (params.get("hold") or 0)
+
+
+######
+# Run one repetition: for each scenario, inject ONLY that scenario into a
+# fresh copy of the eval window, run every method and score it. Scenarios
+# are isolated so injections never overlap and alarms caused by one
+# scenario are never counted as false alarms of another.
+# Returns {method: {scenario: report}}.
+######
+
+def _run(split, thresholds, positions, cfg, clean_raws):
     eval_start = split['split_index']
     eval_features = split['eval_features']
     eval_timestamps = split['eval_timestamps']
     n_eval = len(eval_timestamps)
+    full_timestamps = list(split['baseline_timestamps']) + list(eval_timestamps)
 
-    # Apply all three injections to the same eval window copy.
-    injected = {f: list(v) for f, v in eval_features.items()}
-    intervals = []
+    reports = {method: {} for method in list_methods()}
     for scenario_name, inject_fn in SCENARIO_INJECTORS.items():
         params = dict(cfg[scenario_name])
         params["start_idx"] = positions[scenario_name]
-        res = inject_fn(injected, eval_timestamps, **params)
-        injected = res['features']
-        iv = res['intervals'][0]
-        iv = dict(iv)
+        res = inject_fn(eval_features, eval_timestamps, **params)
+        iv = dict(res['intervals'][0])
         iv['features'] = SCENARIO_FEATURES[scenario_name]
         iv['start_idx'] += eval_start
         iv['end_idx'] += eval_start
-        intervals.append(iv)
 
-    full_features = merge_windows(split['baseline_features'], injected, layout="dict")
-    full_timestamps = list(split['baseline_timestamps']) + list(eval_timestamps)
+        full_features = merge_windows(split['baseline_features'], res['features'],
+                                      layout="dict")
 
-    reports = {}
-    for method in list_methods():
-        thr = thresholds.get(method)
-        if method == "MD":
-            raw = run_method(
-                method, full_features, full_timestamps, threshold=thr,
-                baseline_features=split['baseline_features'],
-                baseline_timestamps=split['baseline_timestamps'],
-            )
-        else:
-            raw = run_method(method, full_features, full_timestamps, threshold=thr)
-
-        # Score each scenario interval separately so we can aggregate
-        # per scenario across repetitions.
-        per_scenario = {}
-        for iv in intervals:
-            r = evaluate_raw(
+        raws = _run_all_methods(split, full_features, full_timestamps, thresholds)
+        for method, raw in raws.items():
+            reports[method][scenario_name] = evaluate_raw(
                 method_name=method,
                 raw_anomalies=raw,
                 timestamps=full_timestamps,
                 intervals=[iv],
                 total_minutes=n_eval,
                 eval_start=eval_start,
+                clean_anomalies=clean_raws[method],
             )
-            per_scenario[iv['scenario']] = r
-        reports[method] = per_scenario
     return reports
 
 
@@ -182,7 +200,7 @@ def _fmt(pair, pct=False, decimals=2):
 ######
 
 def run_evaluation(data_path, baseline_ratio=0.5, repetitions=30, seed=42,
-                   target_fa="ool", spike_mag=5.0, drift_mag=5.0, corr_mag=3.0,
+                   target_fa="1", spike_mag=5.0, drift_mag=5.0, corr_mag=3.0,
                    output_dir=None):
     print("=" * 70)
     print("  COMPARATIVE ANOMALY DETECTION EVALUATION")
@@ -225,17 +243,42 @@ def run_evaluation(data_path, baseline_ratio=0.5, repetitions=30, seed=42,
     thresholds = {"EWMA": ewma_thr, "MD": md_thr, "OOL": None}
     print(f"    Thresholds: EWMA={ewma_thr:.4f}  MD={md_thr:.4f}  OOL=static")
 
-    # 4. Injection config (magnitudes from CLI)
+    # 4. Injection config (magnitudes from CLI, sigma = baseline std)
+    def base_std(name):
+        vals = split['baseline_features'][name]
+        m = sum(vals) / len(vals)
+        return (sum((v - m) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
+
     cfg = {
         "spike": {"feature": "cpu_user_pct", "duration": 5,
-                  "magnitude": spike_mag, "unit": "std"},
+                  "magnitude": spike_mag, "unit": "std",
+                  "sigma": base_std("cpu_user_pct")},
         "drift": {"feature": "mem_util_pct", "duration": 60,
-                  "total_increase": drift_mag, "unit": "std"},
+                  "total_increase": drift_mag, "unit": "std",
+                  "sigma": base_std("mem_util_pct"), "hold": DRIFT_HOLD},
         "correlation_break": {"feature_a": "cpu_user_pct",
                               "feature_b": "sys_load_avg_1",
                               "duration": 30, "magnitude": corr_mag,
-                              "unit": "std"},
+                              "unit": "std",
+                              "sigma_a": base_std("cpu_user_pct"),
+                              "sigma_b": base_std("sys_load_avg_1")},
     }
+    print("    Injection sizes (absolute): "
+          f"spike +{spike_mag * cfg['spike']['sigma']:.2f} cpu_user_pct, "
+          f"drift +{drift_mag * cfg['drift']['sigma']:.2f} mem_util_pct, "
+          f"corr +{corr_mag * cfg['correlation_break']['sigma_a']:.2f} cpu_user_pct / "
+          f"-{corr_mag * cfg['correlation_break']['sigma_b']:.2f} sys_load_avg_1")
+
+    # Alarms on the clean (un-injected) data: these would happen anyway and
+    # are never counted as detections.
+    clean_full = merge_windows(split['baseline_features'], split['eval_features'],
+                               layout="dict")
+    clean_ts = list(split['baseline_timestamps']) + list(split['eval_timestamps'])
+    clean_raws = _run_all_methods(split, clean_full, clean_ts, thresholds)
+    clean_counts = {
+        m: len(evaluate_raw(m, r, clean_ts, [], eval_start=split['split_index'])['all_detected'])
+        for m, r in clean_raws.items()}
+    print(f"    Alarms on clean eval data: {clean_counts}")
 
     # 5. Run `repetitions` randomized repetitions
     print(f"\n[4] Running {repetitions} repetitions (seed={seed})")
@@ -243,11 +286,10 @@ def run_evaluation(data_path, baseline_ratio=0.5, repetitions=30, seed=42,
     for rep in range(repetitions):
         positions = {}
         for scenario_name, inject_fn in SCENARIO_INJECTORS.items():
-            duration = cfg[scenario_name].get("duration", 30)
             lo = EDGE_MARGIN
-            hi = max(lo + 1, n_eval - EDGE_MARGIN - duration)
+            hi = max(lo + 1, n_eval - EDGE_MARGIN - _span(cfg[scenario_name]))
             positions[scenario_name] = rng.randint(lo, hi)
-        run = _run(split, thresholds, positions, cfg)
+        run = _run(split, thresholds, positions, cfg, clean_raws)
         all_runs.append(run)
         if (rep + 1) % 5 == 0 or rep == 0 or rep == repetitions - 1:
             print(f"    rep {rep + 1}/{repetitions} done")
@@ -373,9 +415,10 @@ def main():
                         help="Number of randomized repetitions (default: 30)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for injection positions (default: 42)")
-    parser.add_argument("--target-fa", default="ool",
-                        help="Calibration target: 'ool' (use OOL baseline alarm "
-                             "count) or an explicit integer (default: ool)")
+    parser.add_argument("--target-fa", default="1",
+                        help="Calibration target: an explicit integer number of "
+                             "baseline alarms, or 'ool' (use OOL baseline alarm "
+                             "count) (default: 1)")
     parser.add_argument("--spike-mag", type=float, default=5.0,
                         help="Spike magnitude in std units (default: 5.0)")
     parser.add_argument("--drift-mag", type=float, default=5.0,

@@ -11,6 +11,11 @@ Each injection returns a copy of the data with the anomaly applied,
 plus a list of ground-truth interval dicts describing exactly when and
 where the anomaly was injected.
 
+Magnitudes in unit="std" are multiples of `sigma`. The evaluation passes
+the standard deviation of the metric in the clean BASELINE window, so a
+given magnitude is the same absolute size wherever it is injected. If no
+sigma is given, the std of the data before start_idx is used (fallback).
+
 Data layouts
 ------------
 EWMA / OOL  :  dict {feature_name: [values...]}   +  [timestamps]
@@ -40,15 +45,21 @@ def _std(values):
 # Inject a sudden spike into a single feature
 ######
 
+def _sigma(features, feature, start_idx, sigma):
+    if sigma is not None:
+        return sigma
+    baseline = features[feature][:start_idx] if start_idx > 0 else features[feature]
+    return _std(baseline)
+
+
 def inject_spike(features, timestamps, feature, start_idx, duration=5,
-                 magnitude=5.0, unit="std"):
+                 magnitude=5.0, unit="std", sigma=None):
     result = copy.deepcopy(features)
     ts = list(timestamps)
     intervals = []
 
     end_idx = min(start_idx + duration, len(ts))
-    baseline = features[feature][:start_idx] if start_idx > 0 else features[feature]
-    baseline_std = _std(baseline)
+    baseline_std = _sigma(features, feature, start_idx, sigma)
 
     for i in range(start_idx, end_idx):
         original = result[feature][i]
@@ -71,18 +82,20 @@ def inject_spike(features, timestamps, feature, start_idx, duration=5,
 
 
 ######
-# Inject a slow (linear) drift into a single feature, held after the ramp
+# Inject a slow (linear) drift into a single feature: ramp for `duration`
+# minutes, then hold the full offset for `hold` minutes (None = until the
+# end of the data). The ground-truth interval covers ramp + hold.
 ######
 
 def inject_drift(features, timestamps, feature, start_idx, duration=60,
-                 total_increase=5.0, unit="std"):
+                 total_increase=5.0, unit="std", sigma=None, hold=None):
     result = copy.deepcopy(features)
     ts = list(timestamps)
     intervals = []
 
     end_ramp = min(start_idx + duration, len(ts))
-    baseline = features[feature][:start_idx] if start_idx > 0 else features[feature]
-    baseline_std = _std(baseline)
+    end_idx = len(ts) if hold is None else min(start_idx + duration + hold, len(ts))
+    baseline_std = _sigma(features, feature, start_idx, sigma)
 
     if unit == "std":
         total_offset = total_increase * baseline_std
@@ -91,7 +104,7 @@ def inject_drift(features, timestamps, feature, start_idx, duration=60,
     else:
         total_offset = total_increase
 
-    for i in range(start_idx, len(ts)):
+    for i in range(start_idx, end_idx):
         original = result[feature][i]
         if i < end_ramp:
             frac = (i - start_idx) / duration
@@ -105,10 +118,11 @@ def inject_drift(features, timestamps, feature, start_idx, duration=60,
 
     intervals.append({
         'start_idx': start_idx,
-        'end_idx': len(ts),
+        'end_idx': end_idx,
         'scenario': 'drift',
         'feature': feature,
-        'description': f"drift +{total_increase}{unit} over {duration} min (held after)",
+        'description': f"drift +{total_increase}{unit} over {duration} min, "
+                       f"held {'until end' if hold is None else f'{hold} min'}",
     })
     return {'features': result, 'timestamps': ts, 'intervals': intervals}
 
@@ -118,16 +132,15 @@ def inject_drift(features, timestamps, feature, start_idx, duration=60,
 ######
 
 def inject_correlation_break(features, timestamps, feature_a, feature_b,
-                             start_idx, duration=30, magnitude=3.0, unit="std"):
+                             start_idx, duration=30, magnitude=3.0, unit="std",
+                             sigma_a=None, sigma_b=None):
     result = copy.deepcopy(features)
     ts = list(timestamps)
     intervals = []
 
     end_idx = min(start_idx + duration, len(ts))
-    baseline_a = features[feature_a][:start_idx] if start_idx > 0 else features[feature_a]
-    baseline_b = features[feature_b][:start_idx] if start_idx > 0 else features[feature_b]
-    std_a = _std(baseline_a)
-    std_b = _std(baseline_b)
+    std_a = _sigma(features, feature_a, start_idx, sigma_a)
+    std_b = _sigma(features, feature_b, start_idx, sigma_b)
 
     for i in range(start_idx, end_idx):
         if unit == "std":

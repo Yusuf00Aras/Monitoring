@@ -1,3 +1,18 @@
+"""EWMA control chart (Roberts, 1959) -- one chart per metric.
+
+The EWMA statistic z_t = alpha * x_t + (1 - alpha) * z_{t-1} is compared
+against a FROZEN reference (mean mu_0, standard deviation sigma_0) that is
+fitted once on a clean baseline window, exactly like MD's reference
+distribution. An alarm is raised when
+
+    |z_t - mu_0| > L * sigma_z(t),
+    sigma_z(t) = sigma_0 * sqrt(alpha / (2 - alpha) * (1 - (1 - alpha)^(2t)))
+
+Because the reference is frozen, a slow drift pushes z_t steadily away
+from mu_0 instead of being absorbed by the chart. One alarm is raised per
+excursion (the first minute above the limit), the same alarm unit as OOL
+and MD.
+"""
 import os
 import time
 import logging
@@ -20,9 +35,9 @@ logging.basicConfig(
 )
 
 ALPHA = 0.3
-THRESHOLD = 4.5
+# Control-limit width L in units of sigma_z (classical value L = 3).
+THRESHOLD = 3.0
 POLL_INTERVAL = 60
-WARMUP = 60
 
 DB_CONN_PARAMS = {
     'host': os.environ.get('DB_HOST', 'localhost'),
@@ -36,77 +51,78 @@ USE_DB = True
 
 
 ######
-# EWMA state: {ewma, variance, n, last_forecast}
+# Fit the frozen reference (mu_0, sigma_0) of one metric from a clean
+# baseline window. Called once; never updated afterward.
 ######
 
-def ewma_init(alpha=ALPHA, threshold=THRESHOLD, warmup=WARMUP):
-    return {'alpha': alpha, 'threshold': threshold, 'warmup': warmup,
-            'ewma': None, 'variance': None, 'n': 0, 'last_forecast': None}
+def ewma_fit(baseline_values):
+    x = np.asarray(baseline_values, dtype=float)
+    return {'mean': float(np.mean(x)), 'std': float(np.std(x, ddof=1)) if len(x) > 1 else 0.0}
 
 
 ######
-# Feed one value, return (state, is_anomaly, distance)
+# EWMA state: frozen {mean, std} + running {z, t, in_alarm}
+######
+
+def ewma_init(mean, std, alpha=ALPHA, threshold=THRESHOLD):
+    return {'alpha': alpha, 'threshold': threshold,
+            'mean': float(mean), 'std': float(std),
+            'z': float(mean), 't': 0, 'in_alarm': False}
+
+
+######
+# Feed one value, return (state, is_anomaly, distance).
+# distance = |z_t - mu_0| / sigma_z(t); is_anomaly only on the first
+# minute of an excursion above L.
 ######
 
 def ewma_update(state, value):
-    value = float(value)
     alpha = state['alpha']
-    threshold = state['threshold']
-    warmup = state['warmup']
+    state['t'] += 1
+    state['z'] = alpha * float(value) + (1 - alpha) * state['z']
 
-    if state['ewma'] is None:
-        state['ewma'] = value
-        state['variance'] = 0.0
-        state['n'] = 1
-        state['last_forecast'] = None
-        return state, False, 0.0
+    sigma_z = state['std'] * np.sqrt(
+        alpha / (2 - alpha) * (1 - (1 - alpha) ** (2 * state['t'])))
+    distance = abs(state['z'] - state['mean']) / sigma_z if sigma_z > 0 else 0.0
 
-    # Compare the observation against the forecast made BEFORE this
-    # observation arrived (the previous EWMA) rather than the one just
-    # updated with it -- otherwise every residual is silently shrunk by
-    # a factor of (1 - alpha).
-    forecast = state['ewma']
-    residual = value - forecast
-    state['last_forecast'] = forecast
-
-    std = np.sqrt(state['variance']) if state['variance'] > 0 else 0.0
-    distance = abs(residual) / std if std > 0 else 0.0
-
-    # Running (zero-mean) variance of the residuals. Residuals are
-    # forecast errors and should center on zero, so this converges to
-    # the true residual variance instead of growing without bound.
-    state['n'] += 1
-    residual_count = state['n'] - 1
-    state['variance'] = ((residual_count - 1) * state['variance'] + residual ** 2) / residual_count
-
-    # Advance the forecast for the next step.
-    state['ewma'] = alpha * value + (1 - alpha) * forecast
-
-    is_anomaly = state['n'] > warmup and distance > threshold
+    above = distance > state['threshold']
+    is_anomaly = above and not state['in_alarm']
+    state['in_alarm'] = above
     return state, is_anomaly, distance
 
 
 ######
-# Batch mode: run EWMA on a full dataset, return list of anomaly dicts
+# Fit one chart per metric from a baseline dict {feature: [values]}
 ######
 
-def run_batch(features, timestamps, alpha=ALPHA, threshold=THRESHOLD, warmup=WARMUP):
+def fit_states(baseline_features, alpha=ALPHA, threshold=THRESHOLD):
+    states = {}
+    for name, values in baseline_features.items():
+        fit = ewma_fit(values)
+        states[name] = ewma_init(fit['mean'], fit['std'], alpha, threshold)
+    return states
+
+
+######
+# Batch mode: fit the frozen reference from baseline_features, then run the
+# charts over `features` (which may include baseline and evaluation data).
+######
+
+def run_batch(baseline_features, features, timestamps, alpha=ALPHA, threshold=THRESHOLD):
+    states = fit_states(baseline_features, alpha, threshold)
     anomalies = []
     for name, values in features.items():
-        state = ewma_init(alpha, threshold, warmup)
+        state = states[name]
         for i, value in enumerate(values):
             state, is_anomaly, distance = ewma_update(state, value)
             if is_anomaly:
-                # Collect all metrics at the anomaly timestamp
                 metrics_at_time = {feat: float(feat_values[i])
                                    for feat, feat_values in features.items()}
                 anomalies.append({
                     'timestamp': timestamps[i],
                     'feature': name,
                     'value': float(value),
-                    # The forecast actually used to compute `distance`,
-                    # not the forecast updated afterward for next time.
-                    'ewma': state['last_forecast'],
+                    'ewma': state['z'],
                     'distance': distance,
                     'metrics': metrics_at_time,
                 })
@@ -114,15 +130,22 @@ def run_batch(features, timestamps, alpha=ALPHA, threshold=THRESHOLD, warmup=WAR
 
 
 ######
-# Live monitor: poll CSV every minute, flag anomalies on new rows
+# Live monitor: fits the reference once from the historical data already
+# in the CSV, then charts all subsequent (newly polled) minutes.
 ######
 
 def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
                 poll_interval=POLL_INTERVAL, use_db=USE_DB,
                 conn_params=DB_CONN_PARAMS):
-    features, _ = extract_all_features(data_path)
-    states = {name: ewma_init(alpha, threshold) for name in features.keys()}
-    seen = set()
+    baseline_features, seen_timestamps = extract_all_features(data_path)
+    seen = set(seen_timestamps)
+
+    states = None
+    if seen_timestamps:
+        states = fit_states(baseline_features, alpha, threshold)
+        logging.info(f"Baseline fitted from {len(seen_timestamps)} historical minutes; frozen.")
+    else:
+        logging.info("CSV is empty -- baseline will be fitted once enough data has accumulated.")
 
     # Anomalies are written to per-day CSV files (anomalies_YYYY-MM-DD.csv)
     # so every day gets its own file for easier inspection.
@@ -130,8 +153,8 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
     os.makedirs(anomalies_dir, exist_ok=True)
     logging.info(f"Anomalies will be written to {anomalies_dir}/anomalies_YYYY-MM-DD.csv")
 
-    logging.info(f"Starting EWMA monitor on {data_path}")
-    logging.info(f"alpha={alpha}, threshold={threshold}, poll={poll_interval}s, warmup={WARMUP}")
+    logging.info(f"Starting EWMA control chart monitor on {data_path}")
+    logging.info(f"alpha={alpha}, L={threshold}, poll={poll_interval}s")
     if use_db:
         logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
     logging.info("Waiting for new minute data...")
@@ -147,6 +170,14 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
 
         current_features, current_timestamps = extract_all_features(data_path)
 
+        if states is None:
+            if current_timestamps:
+                states = fit_states(current_features, alpha, threshold)
+                seen = set(current_timestamps)
+                logging.info(f"Baseline fitted from {len(current_timestamps)} historical minutes; frozen.")
+            time.sleep(poll_interval)
+            continue
+
         for i, ts in enumerate(current_timestamps):
             if ts in seen:
                 continue
@@ -158,16 +189,16 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
                     # Collect all metrics at the anomaly timestamp
                     metrics_at_time = {feat: float(feat_values[i])
                                        for feat, feat_values in current_features.items()}
-                    forecast = states[name]['last_forecast']
+                    z = states[name]['z']
                     logging.warning(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
-                                    f"ewma={forecast:.4f} distance={distance:.2f}")
+                                    f"ewma={z:.4f} distance={distance:.2f}")
                     daily_path = os.path.join(anomalies_dir, f"anomalies_{ts[:10]}.csv")
                     file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
                     with open(daily_path, "a", encoding="utf-8") as f:
                         if not file_exists:
                             f.write("timestamp,feature,value,ewma,distance,metrics\n")
                         f.write(f"{ts},{name}: value={value:.4f}, "
-                                f"ewma={forecast:.4f}, "
+                                f"ewma={z:.4f}, "
                                 f"distance={distance:.2f}, "
                                 f"metrics={metrics_at_time}\n")
 

@@ -1,11 +1,10 @@
 """Method loader -- unified interface to run EWMA, MD, or OOL in batch mode.
 
-MD now needs a baseline (baseline_features + baseline_timestamps) to fit
-its frozen reference distribution (mean, inverse covariance) before it can
-score anything -- that distribution is fit once and never updated, so the
-caller must supply the clean baseline explicitly. EWMA and OOL don't need
-this: they build their own state online (EWMA/OOL each warm up on the
-start of whatever stream they're given).
+EWMA and MD need a baseline (baseline_features + baseline_timestamps) to
+fit their frozen reference (EWMA: per-metric mean/std, MD: mean/inverse
+covariance) before they can score anything -- the reference is fit once
+and never updated, so the caller must supply the clean baseline
+explicitly. OOL doesn't need this: its limits are static.
 """
 from __future__ import annotations
 
@@ -44,8 +43,8 @@ def _import_method_module(method):
 
 ######
 # Run a method in batch mode and return its raw anomaly list.
-# MD requires baseline_features/baseline_timestamps (dict layout, same
-# shape as dict_features) to fit its frozen reference distribution.
+# EWMA and MD require baseline_features/baseline_timestamps (dict layout,
+# same shape as dict_features) to fit their frozen reference.
 ######
 
 def run_method(method, dict_features, timestamps, threshold=None,
@@ -53,25 +52,26 @@ def run_method(method, dict_features, timestamps, threshold=None,
     method = method.upper()
     mod = _import_method_module(method)
 
+    if method in ("EWMA", "MD") and (baseline_features is None
+                                     or baseline_timestamps is None):
+        raise ValueError(
+            f"{method} requires baseline_features and baseline_timestamps to "
+            "fit its frozen reference."
+        )
+
     if method == "EWMA":
-        return mod.run_batch(dict_features, timestamps,
-                             threshold=threshold if threshold is not None else 3.0,
+        return mod.run_batch(baseline_features, dict_features, timestamps,
+                             threshold=threshold if threshold is not None else mod.THRESHOLD,
                              **kwargs)
     elif method == "OOL":
-        return mod.run_batch(dict_features, timestamps,
-                             threshold=threshold if threshold is not None else 3.0,
-                             **kwargs)
+        # Static limits -- no threshold is passed or tuned.
+        return mod.run_batch(dict_features, timestamps, **kwargs)
     elif method == "MD":
         from injection import dict_to_vector_layout
-        if baseline_features is None or baseline_timestamps is None:
-            raise ValueError(
-                "MD requires baseline_features and baseline_timestamps to fit "
-                "its frozen reference distribution (mean, inverse covariance)."
-            )
         baseline_vectors, _ = dict_to_vector_layout(baseline_features, baseline_timestamps)
         vectors, ts = dict_to_vector_layout(dict_features, timestamps)
         return mod.run_batch(baseline_vectors, vectors, ts,
-                             threshold=threshold if threshold is not None else 7.0,
+                             threshold=threshold if threshold is not None else mod.THRESHOLD,
                              **kwargs)
     else:
         raise ValueError(f"Unknown method: {method!r}. Expected 'EWMA', 'MD', or 'OOL'.")

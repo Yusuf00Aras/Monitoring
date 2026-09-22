@@ -13,6 +13,10 @@ Rules
 * Alarms on an injected feature within `grace` minutes after the interval
   ends (e.g. EWMA reacting to the value dropping back) are ignored --
   they are caused by the injection but are not a detection.
+* `clean` is the set of (index, feature) alarms the same method raises on
+  the same data WITHOUT the injection. Such alarms would have happened
+  anyway, so they never count as a detection and are always counted as
+  false alarms, even when they fall inside an injection interval.
 """
 from __future__ import annotations
 
@@ -59,12 +63,18 @@ def _in_interval(d, iv, grace=0):
 # Score a method's detections against the ground-truth intervals
 ######
 
-def evaluate(method_name, detected, intervals, total_minutes, eval_start=0, grace=5):
+def _key(d):
+    return (d['index'], d['feature'])
+
+
+def evaluate(method_name, detected, intervals, total_minutes, eval_start=0, grace=5,
+             clean=None):
+    clean = clean or set()
     detected = [d for d in detected if d['index'] >= eval_start]
     scenario_results = []
 
     for iv in intervals:
-        hits = [d for d in detected if _in_interval(d, iv)]
+        hits = [d for d in detected if _in_interval(d, iv) and _key(d) not in clean]
         if hits:
             first = min(hits, key=lambda d: d['index'])
             scenario_results.append({
@@ -89,7 +99,7 @@ def evaluate(method_name, detected, intervals, total_minutes, eval_start=0, grac
 
     false_alarms = sum(
         1 for d in detected
-        if not any(_in_interval(d, iv, grace) for iv in intervals)
+        if _key(d) in clean or not any(_in_interval(d, iv, grace) for iv in intervals)
     )
 
     hours = total_minutes / 60.0 if total_minutes > 0 else 1.0
@@ -113,8 +123,12 @@ def evaluate(method_name, detected, intervals, total_minutes, eval_start=0, grac
 ######
 
 def evaluate_raw(method_name, raw_anomalies, timestamps, intervals,
-                 total_minutes=None, eval_start=0, grace=5):
+                 total_minutes=None, eval_start=0, grace=5, clean_anomalies=None):
     detected = normalize_anomalies(raw_anomalies, timestamps)
+    clean = None
+    if clean_anomalies is not None:
+        clean = {_key(d) for d in normalize_anomalies(clean_anomalies, timestamps)}
     if total_minutes is None:
         total_minutes = len(timestamps) - eval_start
-    return evaluate(method_name, detected, intervals, total_minutes, eval_start, grace)
+    return evaluate(method_name, detected, intervals, total_minutes, eval_start, grace,
+                    clean)

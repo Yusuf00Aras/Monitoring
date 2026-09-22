@@ -115,7 +115,7 @@ def md_fit(baseline_vectors, regulator=1e-8):
 
 
 ######
-# MD state: frozen {mean, inv_cov, threshold}
+# MD state: frozen {mean, inv_cov, threshold} + running {in_alarm}
 ######
 
 def md_init(mean, inv_cov, threshold=THRESHOLD):
@@ -123,20 +123,24 @@ def md_init(mean, inv_cov, threshold=THRESHOLD):
         'mean': mean,
         'inv_cov': inv_cov,
         'threshold': threshold,
+        'in_alarm': False,
     }
 
 
 ######
 # Feed one vector, return (state, is_anomaly, distance).
 # Scores against the frozen reference distribution only -- mean/inv_cov
-# are never updated here.
+# are never updated here. One alarm per excursion: is_anomaly is True only
+# on the first minute above the threshold (same alarm unit as OOL/EWMA).
 ######
 
 def md_update(state, x):
     x = np.asarray(x, dtype=float)
     diff = x - state['mean']
     dist = float(np.sqrt(diff @ state['inv_cov'] @ diff))
-    is_anomaly = dist > state['threshold']
+    above = dist > state['threshold']
+    is_anomaly = above and not state['in_alarm']
+    state['in_alarm'] = above
     return state, is_anomaly, dist
 
 
