@@ -1,9 +1,15 @@
-"""Calibration — tune each method's threshold to a target false alarm rate.
+"""Calibration -- tune each method's threshold to a target false alarm rate.
 
 Each method has a single threshold parameter. By running each method on
 a clean baseline window (no injections) and counting the false alarms,
 we binary-search for the threshold that produces the desired false alarm
 rate. All three methods are then compared at that same rate.
+
+For MD, the same baseline window is used both to fit the frozen reference
+distribution and to score it (count false alarms) during calibration --
+there are no injected anomalies in the baseline, so fitting and scoring
+on the same clean data is consistent with how MD is fit once for real
+evaluation runs too.
 """
 from __future__ import annotations
 
@@ -88,26 +94,40 @@ def calibrate_ewma(features, timestamps, target_false_alarms=0,
 
 
 ######
-# Calibrate the OOL threshold on a clean baseline window
-# OOL now uses static limits (90%) — no calibration needed, return a dummy value.
+# Calibrate the OOL threshold on a clean baseline window.
+# OOL's limit is now baseline-derived (frozen mean +/- threshold*std), so
+# this actually searches for a threshold now instead of returning a
+# hardcoded static value.
 ######
 
-def calibrate_ool(features, timestamps, target_false_alarms=0, **kwargs):
-    return 90.0
-
-
-######
-# Calibrate the MD threshold on a clean baseline window (vector layout)
-######
-
-def calibrate_md(features, timestamps, target_false_alarms=0,
-                 warmup=None, **kwargs):
-    mod = _import_method_module("MD")
+def calibrate_ool(features, timestamps, target_false_alarms=0,
+                  warmup=None, sustained_minutes=None, **kwargs):
+    mod = _import_method_module("OOL")
     if warmup is None:
         warmup = mod.WARMUP
+    if sustained_minutes is None:
+        sustained_minutes = mod.SUSTAINED_MINUTES
 
     def run_fn(threshold, features, timestamps):
-        return mod.run_batch(features, timestamps, threshold=threshold, warmup=warmup)
+        return mod.run_batch(features, timestamps, threshold=threshold,
+                             warmup=warmup, sustained_minutes=sustained_minutes)
+
+    return calibrate_threshold(run_fn, features, timestamps,
+                               target_false_alarms,
+                               threshold_low=0.5, threshold_high=20.0, **kwargs)
+
+
+######
+# Calibrate the MD threshold on a clean baseline window (vector layout).
+# The baseline is used both to fit MD's frozen reference distribution and
+# to score itself for false-alarm counting.
+######
+
+def calibrate_md(features, timestamps, target_false_alarms=0, **kwargs):
+    mod = _import_method_module("MD")
+
+    def run_fn(threshold, features, timestamps):
+        return mod.run_batch(features, features, timestamps, threshold=threshold)
 
     return calibrate_threshold(run_fn, features, timestamps,
                                target_false_alarms,

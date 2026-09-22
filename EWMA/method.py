@@ -36,12 +36,12 @@ USE_DB = True
 
 
 ######
-# EWMA state: {ewma, variance, n}
+# EWMA state: {ewma, variance, n, last_forecast}
 ######
 
 def ewma_init(alpha=ALPHA, threshold=THRESHOLD, warmup=WARMUP):
     return {'alpha': alpha, 'threshold': threshold, 'warmup': warmup,
-            'ewma': None, 'variance': None, 'n': 0}
+            'ewma': None, 'variance': None, 'n': 0, 'last_forecast': None}
 
 
 ######
@@ -58,16 +58,29 @@ def ewma_update(state, value):
         state['ewma'] = value
         state['variance'] = 0.0
         state['n'] = 1
+        state['last_forecast'] = None
         return state, False, 0.0
 
-    state['ewma'] = alpha * value + (1 - alpha) * state['ewma']
-    residual = value - state['ewma']
+    # Compare the observation against the forecast made BEFORE this
+    # observation arrived (the previous EWMA) rather than the one just
+    # updated with it -- otherwise every residual is silently shrunk by
+    # a factor of (1 - alpha).
+    forecast = state['ewma']
+    residual = value - forecast
+    state['last_forecast'] = forecast
+
     std = np.sqrt(state['variance']) if state['variance'] > 0 else 0.0
     distance = abs(residual) / std if std > 0 else 0.0
 
+    # Running (zero-mean) variance of the residuals. Residuals are
+    # forecast errors and should center on zero, so this converges to
+    # the true residual variance instead of growing without bound.
     state['n'] += 1
-    delta = residual - (residual / state['n'])
-    state['variance'] += delta * residual / state['n']
+    residual_count = state['n'] - 1
+    state['variance'] = ((residual_count - 1) * state['variance'] + residual ** 2) / residual_count
+
+    # Advance the forecast for the next step.
+    state['ewma'] = alpha * value + (1 - alpha) * forecast
 
     is_anomaly = state['n'] > warmup and distance > threshold
     return state, is_anomaly, distance
@@ -91,7 +104,9 @@ def run_batch(features, timestamps, alpha=ALPHA, threshold=THRESHOLD, warmup=WAR
                     'timestamp': timestamps[i],
                     'feature': name,
                     'value': float(value),
-                    'ewma': state['ewma'],
+                    # The forecast actually used to compute `distance`,
+                    # not the forecast updated afterward for next time.
+                    'ewma': state['last_forecast'],
                     'distance': distance,
                     'metrics': metrics_at_time,
                 })
@@ -143,15 +158,16 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
                     # Collect all metrics at the anomaly timestamp
                     metrics_at_time = {feat: float(feat_values[i])
                                        for feat, feat_values in current_features.items()}
+                    forecast = states[name]['last_forecast']
                     logging.warning(f"[{ts}] ANOMALY  {name}: value={value:.4f} "
-                                    f"ewma={states[name]['ewma']:.4f} distance={distance:.2f}")
+                                    f"ewma={forecast:.4f} distance={distance:.2f}")
                     daily_path = os.path.join(anomalies_dir, f"anomalies_{ts[:10]}.csv")
                     file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
                     with open(daily_path, "a", encoding="utf-8") as f:
                         if not file_exists:
                             f.write("timestamp,feature,value,ewma,distance,metrics\n")
                         f.write(f"{ts},{name}: value={value:.4f}, "
-                                f"ewma={states[name]['ewma']:.4f}, "
+                                f"ewma={forecast:.4f}, "
                                 f"distance={distance:.2f}, "
                                 f"metrics={metrics_at_time}\n")
 

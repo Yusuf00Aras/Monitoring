@@ -1,14 +1,16 @@
-"""run_evaluation.py — main comparative evaluation script.
+"""run_evaluation.py -- main comparative evaluation script.
 
 Implements the full evaluation pipeline:
 
   1. Load telemetry data from one server (CSV).
   2. Split into a clean baseline window and an evaluation window.
-  3. Calibrate EWMA, MD and OOL to the same false alarm rate on baseline.
-  4. Inject the three scenarios into the evaluation window (Python mask).
-  5. Run all three methods on the injected evaluation window.
-  6. Measure detection rate, detection delay and false alarm rate.
-  7. Print a comparison report and save it to CSV.
+  3. Calibrate EWMA, OOL and MD to the same false alarm rate on baseline.
+  4. Run spike, drift and correlation-break as three INDEPENDENT
+     evaluations (Option A): each starts from the same clean baseline,
+     with freshly initialized method state, and only that scenario's
+     injected evaluation data -- no state carries over between scenarios.
+  5. Combine the three per-scenario results per method into one report.
+  6. Print a comparison report and save it to CSV.
 
 Usage
 -----
@@ -31,7 +33,8 @@ if _EVAL_DIR not in sys.path:
     sys.path.insert(0, _EVAL_DIR)
 
 from EWMA.cleaning_utils import extract_all_features
-from injection import inject_all, dict_to_vector_layout
+from injection import inject_spike, inject_drift, inject_correlation_break, \
+    dict_to_vector_layout, _default_injection_config
 from window_split import split_windows, merge_windows
 from calibration import calibrate_all
 from method_loader import run_method, list_methods
@@ -47,6 +50,61 @@ DEFAULT_THRESHOLDS = {
     "OOL": 3.0,
     "MD": 7.0,
 }
+
+
+######
+# Scenario name -> injection function. Each is run independently: same
+# clean baseline, fresh method state, only this scenario injected.
+######
+
+SCENARIO_INJECTORS = {
+    "spike": inject_spike,
+    "drift": inject_drift,
+    "correlation_break": inject_correlation_break,
+}
+
+
+######
+# Combine three independent single-scenario reports (one per scenario)
+# for one method into a single report with the same shape evaluate()
+# would produce for 3 intervals, so downstream printing/CSV export
+# doesn't need to change.
+######
+
+def _combine_scenario_reports(method_name, scenario_reports):
+    scenario_results = []
+    all_detected = []
+    total_false_alarms = 0
+    total_minutes = 0
+
+    for r in scenario_reports:
+        scenario_results.extend(r['scenario_results'])
+        all_detected.extend(r['all_detected'])
+        total_false_alarms += r['false_alarms']
+        total_minutes += r['total_minutes']
+
+    total_injections = len(scenario_results)
+    detected_count = sum(1 for sr in scenario_results if sr['detected'])
+    detection_rate = detected_count / total_injections if total_injections else 0.0
+
+    delays = [sr['delay_minutes'] for sr in scenario_results if sr['detected']]
+    mean_delay = sum(delays) / len(delays) if delays else None
+
+    hours = total_minutes / 60.0 if total_minutes > 0 else 1.0
+    false_alarm_rate = total_false_alarms / hours
+
+    return {
+        'method': method_name,
+        'total_injections': total_injections,
+        'detected_count': detected_count,
+        'detection_rate': detection_rate,
+        'mean_delay_minutes': mean_delay,
+        'false_alarms': total_false_alarms,
+        'false_alarm_rate_per_hour': false_alarm_rate,
+        'total_minutes': total_minutes,
+        'scenario_results': scenario_results,
+        'all_detected': all_detected,
+    }
 
 
 ######
@@ -90,49 +148,65 @@ def run_evaluation(data_path, baseline_ratio=0.5, target_false_alarms=0,
         thresholds = dict(DEFAULT_THRESHOLDS)
     print(f"    Thresholds: {thresholds}")
 
-    # 4. Inject anomalies into the evaluation window
-    print("\n[4] Injecting anomalies (Python mask)")
-    injection_result = inject_all(split['eval_features'], split['eval_timestamps'])
-    injected_eval = injection_result['features']
-    intervals = injection_result['intervals']
-    for iv in intervals:
-        print(f"    [{iv['scenario']}] idx {iv['start_idx']}–{iv['end_idx']}  {iv['description']}")
-
-    # 5. Merge baseline + injected eval so each method sees the full stream
-    full_features = merge_windows(split['baseline_features'], injected_eval, layout="dict")
-    full_timestamps = list(split['baseline_timestamps']) + list(split['eval_timestamps'])
-
-    # 6. Run all three methods
-    print("\n[5] Running methods on injected data")
-    reports = {}
+    # 4. Run spike, drift and correlation-break as three INDEPENDENT
+    #    evaluations. Each uses the same clean baseline, fresh method
+    #    state, and only its own injected scenario -- no state or
+    #    injected values leak between scenarios.
+    print("\n[4] Running each scenario independently (Option A)")
+    cfg = _default_injection_config(len(split['eval_timestamps']))
     eval_start = split['split_index']
-    # Shift interval indices: they are relative to the eval window, but
-    # detected anomalies are indexed in the full stream.
-    shifted_intervals = [
-        {
-            'start_idx': iv['start_idx'] + eval_start,
-            'end_idx': iv['end_idx'] + eval_start,
-            'scenario': iv['scenario'],
-            'feature': iv['feature'],
-            'description': iv['description'],
-        }
-        for iv in intervals
-    ]
 
-    for method in list_methods():
-        print(f"    Running {method} ...")
-        thr = thresholds[method]
-        raw_anomalies = run_method(method, full_features, full_timestamps, threshold=thr)
-        report = evaluate_raw(
-            method_name=method,
-            raw_anomalies=raw_anomalies,
-            timestamps=full_timestamps,
-            intervals=shifted_intervals,
-            total_minutes=len(split['eval_timestamps']),
-        )
-        reports[method] = report
+    per_method_scenario_reports = {m: [] for m in list_methods()}
 
-    # 7. Print comparison report
+    for scenario_name, inject_fn in SCENARIO_INJECTORS.items():
+        injection_result = inject_fn(split['eval_features'], split['eval_timestamps'],
+                                     **cfg[scenario_name])
+        injected_eval = injection_result['features']
+        intervals = injection_result['intervals']
+
+        full_features = merge_windows(split['baseline_features'], injected_eval, layout="dict")
+        full_timestamps = list(split['baseline_timestamps']) + list(split['eval_timestamps'])
+
+        shifted_intervals = [
+            {
+                'start_idx': iv['start_idx'] + eval_start,
+                'end_idx': iv['end_idx'] + eval_start,
+                'scenario': iv['scenario'],
+                'feature': iv['feature'],
+                'description': iv['description'],
+            }
+            for iv in intervals
+        ]
+        iv0 = shifted_intervals[0]
+        print(f"    [{scenario_name}] idx {iv0['start_idx']}-{iv0['end_idx']}  {iv0['description']}")
+
+        for method in list_methods():
+            thr = thresholds[method]
+            if method == "MD":
+                raw_anomalies = run_method(
+                    method, full_features, full_timestamps, threshold=thr,
+                    baseline_features=split['baseline_features'],
+                    baseline_timestamps=split['baseline_timestamps'],
+                )
+            else:
+                raw_anomalies = run_method(method, full_features, full_timestamps, threshold=thr)
+
+            report = evaluate_raw(
+                method_name=method,
+                raw_anomalies=raw_anomalies,
+                timestamps=full_timestamps,
+                intervals=shifted_intervals,
+                total_minutes=len(split['eval_timestamps']),
+            )
+            per_method_scenario_reports[method].append(report)
+
+    # 5. Combine the three independent scenario reports per method
+    reports = {
+        method: _combine_scenario_reports(method, per_method_scenario_reports[method])
+        for method in list_methods()
+    }
+
+    # 6. Print comparison report
     print("\n" + "=" * 70)
     print("  RESULTS")
     print("=" * 70)
@@ -140,7 +214,7 @@ def run_evaluation(data_path, baseline_ratio=0.5, target_false_alarms=0,
         print()
         print(format_report(report))
 
-    # 8. Save results to CSV
+    # 7. Save results to CSV
     if output_dir is None:
         output_dir = os.path.join(_PROJECT_ROOT, "evaluation", "RESULTS")
     os.makedirs(output_dir, exist_ok=True)

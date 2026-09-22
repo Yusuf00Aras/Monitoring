@@ -34,7 +34,6 @@ logging.basicConfig(
 THRESHOLD = 4.44
 
 POLL_INTERVAL = 60
-WARMUP = 60
 
 
 # Feature names in the exact order produced by extract_important_features()
@@ -65,7 +64,8 @@ USE_DB = True
 
 
 ######
-# Batch Mahalanobis distance using full-dataset covariance
+# Batch Mahalanobis distance using full-dataset covariance (unrelated to
+# the online/frozen detector below -- kept only for ad-hoc inspection).
 ######
 
 def mahalanobis_distances(data, regulator=1e-8, invertible=True):
@@ -96,112 +96,71 @@ def mahalanobis_distances(data, regulator=1e-8, invertible=True):
 
 
 ######
-# MD state: {n, mean, cov}
+# Fit MD's frozen reference distribution (mean, inverse covariance) from
+# a clean baseline window. Called once; the result is reused for scoring
+# and is never updated afterward -- injected/evaluation data does not
+# change the reference distribution.
 ######
 
-def md_init(threshold=THRESHOLD, warmup=WARMUP, regulator=1e-8):
+def md_fit(baseline_vectors, regulator=1e-8):
+    X = np.asarray(baseline_vectors, dtype=float)
+    mean = np.mean(X, axis=0)
+    cov = np.cov(X, rowvar=False)
+    cov_reg = cov + regulator * np.eye(cov.shape[0])
+    try:
+        inv_cov = np.linalg.inv(cov_reg)
+    except np.linalg.LinAlgError:
+        inv_cov = np.linalg.pinv(cov_reg)
+    return {'mean': mean, 'inv_cov': inv_cov}
+
+
+######
+# MD state: frozen {mean, inv_cov, threshold}
+######
+
+def md_init(mean, inv_cov, threshold=THRESHOLD):
     return {
+        'mean': mean,
+        'inv_cov': inv_cov,
         'threshold': threshold,
-        'warmup': warmup,
-        'regulator': regulator,
-        'n': 0,
-        'mean': None,
-        'cov': None
     }
 
 
 ######
-# Feed one vector, return (state, is_anomaly, distance)
+# Feed one vector, return (state, is_anomaly, distance).
+# Scores against the frozen reference distribution only -- mean/inv_cov
+# are never updated here.
 ######
 
 def md_update(state, x):
     x = np.asarray(x, dtype=float)
-
-    threshold = state['threshold']
-    warmup = state['warmup']
-    regulator = state['regulator']
-
-    if state['n'] == 0:
-        state['mean'] = x.copy()
-        state['cov'] = np.zeros((len(x), len(x)))
-        state['n'] = 1
-
-        return state, False, 0.0
-
-    n = state['n'] + 1
-
-    delta = x - state['mean']
-    state['mean'] += delta / n
-
-    delta2 = x - state['mean']
-
-    state['cov'] = (
-        (state['cov'] * (state['n'] - 1))
-        + np.outer(delta, delta2)
-    ) / (n - 1)
-
-    state['n'] = n
-
-    # Do not detect anomalies during warm-up
-    if state['n'] <= warmup:
-        return state, False, 0.0
-
-    cov = (
-        state['cov']
-        + regulator * np.eye(state['cov'].shape[0])
-    )
-
-    try:
-        inv_cov = np.linalg.inv(cov)
-    except np.linalg.LinAlgError:
-        inv_cov = np.linalg.pinv(cov)
-
     diff = x - state['mean']
-
-    # Ordinary Mahalanobis distance
-    dist = float(
-        np.sqrt(diff @ inv_cov @ diff)
-    )
-
-    is_anomaly = dist > threshold
-
+    dist = float(np.sqrt(diff @ state['inv_cov'] @ diff))
+    is_anomaly = dist > state['threshold']
     return state, is_anomaly, dist
 
 
 ######
-# Batch mode
+# Batch mode: fit the reference distribution once from baseline_vectors,
+# then score every vector in `features` (which may include baseline and
+# evaluation/injected data) against those fixed parameters.
 ######
 
-def run_batch(
-    features,
-    timestamps,
-    threshold=THRESHOLD,
-    warmup=WARMUP,
-    regulator=1e-8
-):
-    state = md_init(
-        threshold,
-        warmup,
-        regulator
-    )
+def run_batch(baseline_vectors, features, timestamps, threshold=THRESHOLD, regulator=1e-8):
+    fit = md_fit(baseline_vectors, regulator)
+    state = md_init(fit['mean'], fit['inv_cov'], threshold)
 
     anomalies = []
 
     for i, x in enumerate(features):
-
-        state, is_anomaly, dist = md_update(
-            state,
-            x
-        )
+        state, is_anomaly, dist = md_update(state, x)
 
         if is_anomaly:
-
             metrics_at_time = {
                 name: float(x[j])
                 for j, name in enumerate(FEATURE_NAMES)
                 if j < len(x)
             }
-
             anomalies.append({
                 'timestamp': timestamps[i],
                 'distance': dist,
@@ -212,7 +171,9 @@ def run_batch(
 
 
 ######
-# Live monitor
+# Live monitor: fits the reference distribution once from whatever
+# historical data already exists in the CSV, then scores all subsequent
+# (including newly polled) data against that fixed distribution.
 ######
 
 def run_monitor(
@@ -220,159 +181,91 @@ def run_monitor(
     threshold=THRESHOLD,
     poll_interval=POLL_INTERVAL,
     use_db=USE_DB,
-    conn_params=DB_CONN_PARAMS
+    conn_params=DB_CONN_PARAMS,
+    regulator=1e-8,
 ):
+    baseline_vectors, seen_timestamps = extract_important_features(data_path)
+    seen = set(seen_timestamps)
 
-    state = md_init(threshold)
+    state = None
+    if baseline_vectors:
+        fit = md_fit(baseline_vectors, regulator)
+        state = md_init(fit['mean'], fit['inv_cov'], threshold)
+        logging.info(f"Baseline fitted from {len(baseline_vectors)} historical minutes; frozen.")
+    else:
+        logging.info("CSV is empty -- baseline will be fitted once enough data has accumulated.")
 
-    seen = set()
-
-    anomalies_dir = os.path.join(
-        _BASE_DIR,
-        'ANOMALIES'
-    )
-
-    os.makedirs(
-        anomalies_dir,
-        exist_ok=True
-    )
-
-    logging.info(
-        f"Anomalies will be written to "
-        f"{anomalies_dir}/anomalies_YYYY-MM-DD.csv"
-    )
-
-    logging.info(
-        f"Starting Mahalanobis monitor on {data_path}"
-    )
-
-    logging.info(
-        f"threshold={threshold}, "
-        f"poll={poll_interval}s, "
-        f"warmup={state['warmup']}"
-    )
+    anomalies_dir = os.path.join(_BASE_DIR, 'ANOMALIES')
+    os.makedirs(anomalies_dir, exist_ok=True)
+    logging.info(f"Anomalies will be written to {anomalies_dir}/anomalies_YYYY-MM-DD.csv")
+    logging.info(f"Starting Mahalanobis monitor on {data_path}")
+    logging.info(f"threshold={threshold}, poll={poll_interval}s (reference distribution frozen at fit time)")
 
     if use_db:
         logging.info(
-            f"DB fetch enabled: "
-            f"{conn_params['host']}:"
-            f"{conn_params['port']}/"
-            f"{conn_params['dbname']}"
+            f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}"
         )
 
-    logging.info(
-        "Waiting for new minute data..."
-    )
+    logging.info("Waiting for new minute data...")
 
     while True:
-
         if use_db:
             try:
-
-                n = fetch_and_append(
-                    conn_params,
-                    data_path
-                )
-
+                n = fetch_and_append(conn_params, data_path)
                 if n:
-                    logging.info(
-                        f"  fetched {n} row(s) from DB "
-                        f"{time.strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-
+                    logging.info(f"  fetched {n} row(s) from DB {time.strftime('%Y-%m-%d %H:%M:%S')}")
             except Exception as e:
+                logging.error(f"  DB fetch failed: {e}")
 
-                logging.error(
-                    f"  DB fetch failed: {e}"
-                )
+        current_features, current_timestamps = extract_important_features(data_path)
 
-        current_features, current_timestamps = (
-            extract_important_features(data_path)
-        )
+        if state is None:
+            if current_features:
+                fit = md_fit(current_features, regulator)
+                state = md_init(fit['mean'], fit['inv_cov'], threshold)
+                seen = set(current_timestamps)
+                logging.info(f"Baseline fitted from {len(current_features)} historical minutes; frozen.")
+            time.sleep(poll_interval)
+            continue
 
         for i, ts in enumerate(current_timestamps):
-
             if ts in seen:
                 continue
-
             seen.add(ts)
 
-            state, is_anomaly, dist = md_update(
-                state,
-                current_features[i]
-            )
+            state, is_anomaly, dist = md_update(state, current_features[i])
 
             if is_anomaly:
-
                 x = current_features[i]
-
                 metrics_at_time = {
                     name: float(x[j])
                     for j, name in enumerate(FEATURE_NAMES)
                     if j < len(x)
                 }
-
                 logging.warning(
-                    f"[{ts}] ANOMALY  "
-                    f"Mahalanobis distance={dist:.4f} "
-                    f"(threshold={threshold:.2f})"
+                    f"[{ts}] ANOMALY  Mahalanobis distance={dist:.4f} (threshold={threshold:.2f})"
                 )
-
-                daily_path = os.path.join(
-                    anomalies_dir,
-                    f"anomalies_{ts[:10]}.csv"
-                )
-
-                file_exists = (
-                    os.path.exists(daily_path)
-                    and os.path.getsize(daily_path) > 0
-                )
-
-                with open(
-                    daily_path,
-                    "a",
-                    encoding="utf-8"
-                ) as f:
-
+                daily_path = os.path.join(anomalies_dir, f"anomalies_{ts[:10]}.csv")
+                file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
+                with open(daily_path, "a", encoding="utf-8") as f:
                     if not file_exists:
-                        f.write(
-                            "timestamp,distance,metrics\n"
-                        )
-
-                    f.write(
-                        f"{ts},"
-                        f"{dist:.4f}, "
-                        f"metrics={metrics_at_time}\n"
-                    )
+                        f.write("timestamp,distance,metrics\n")
+                    f.write(f"{ts},{dist:.4f}, metrics={metrics_at_time}\n")
 
         time.sleep(poll_interval)
 
 
 if __name__ == "__main__":
-
-    features, timestamps = (
-        extract_important_features(DATA_PATH)
-    )
+    features, timestamps = extract_important_features(DATA_PATH)
 
     if features:
-
-        distances = mahalanobis_distances(
-            features
-        )
-
+        distances = mahalanobis_distances(features)
         logging.info(
             f"Baseline: {len(distances)} minutes, "
-            f"median distance="
-            f"{np.median(distances):.4f}, "
-            f"max distance="
-            f"{max(distances):.4f}"
+            f"median distance={np.median(distances):.4f}, "
+            f"max distance={max(distances):.4f}"
         )
-
     else:
-
-        logging.info(
-            "CSV is empty — starting fresh, "
-            "baseline will be built from DB data."
-        )
+        logging.info("CSV is empty -- starting fresh, baseline will be built from DB data.")
 
     run_monitor()
