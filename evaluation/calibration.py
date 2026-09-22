@@ -94,30 +94,6 @@ def calibrate_ewma(features, timestamps, target_false_alarms=0,
 
 
 ######
-# Calibrate the OOL threshold on a clean baseline window.
-# OOL's limit is now baseline-derived (frozen mean +/- threshold*std), so
-# this actually searches for a threshold now instead of returning a
-# hardcoded static value.
-######
-
-def calibrate_ool(features, timestamps, target_false_alarms=0,
-                  warmup=None, sustained_minutes=None, **kwargs):
-    mod = _import_method_module("OOL")
-    if warmup is None:
-        warmup = mod.WARMUP
-    if sustained_minutes is None:
-        sustained_minutes = mod.SUSTAINED_MINUTES
-
-    def run_fn(threshold, features, timestamps):
-        return mod.run_batch(features, timestamps, threshold=threshold,
-                             warmup=warmup, sustained_minutes=sustained_minutes)
-
-    return calibrate_threshold(run_fn, features, timestamps,
-                               target_false_alarms,
-                               threshold_low=0.5, threshold_high=20.0, **kwargs)
-
-
-######
 # Calibrate the MD threshold on a clean baseline window (vector layout).
 # The baseline is used both to fit MD's frozen reference distribution and
 # to score itself for false-alarm counting.
@@ -135,7 +111,8 @@ def calibrate_md(features, timestamps, target_false_alarms=0, **kwargs):
 
 
 ######
-# Calibrate EWMA, OOL and MD to the same false alarm rate
+# Calibrate EWMA and MD to the same false alarm rate.
+# OOL is not calibrated -- its limits are static.
 ######
 
 def calibrate_all(baseline_dict_features, baseline_vector_features,
@@ -144,10 +121,7 @@ def calibrate_all(baseline_dict_features, baseline_vector_features,
     ewma_thr = calibrate_ewma(baseline_dict_features, timestamps, target_false_alarms)
     print(f"  EWMA threshold = {ewma_thr:.4f}")
 
-    ool_thr = calibrate_ool(baseline_dict_features, timestamps, target_false_alarms)
-    print(f"  OOL  threshold = {ool_thr:.4f}")
-
     md_thr = calibrate_md(baseline_vector_features, timestamps, target_false_alarms)
     print(f"  MD   threshold = {md_thr:.4f}")
 
-    return {"EWMA": ewma_thr, "OOL": ool_thr, "MD": md_thr}
+    return {"EWMA": ewma_thr, "MD": md_thr}

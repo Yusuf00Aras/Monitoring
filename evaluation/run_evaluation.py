@@ -4,24 +4,30 @@ Implements the full evaluation pipeline:
 
   1. Load telemetry data from one server (CSV).
   2. Split into a clean baseline window and an evaluation window.
-  3. Calibrate EWMA, OOL and MD to the same false alarm rate on baseline.
-  4. Run spike, drift and correlation-break as three INDEPENDENT
-     evaluations (Option A): each starts from the same clean baseline,
-     with freshly initialized method state, and only that scenario's
-     injected evaluation data -- no state carries over between scenarios.
-  5. Combine the three per-scenario results per method into one report.
+  3. Calibrate EWMA and MD to the same false alarm rate on baseline.
+     OOL is NOT calibrated -- its limits are static. The calibration
+     target is the number of alarms OOL produces on the baseline window,
+     so all three methods end up with the same baseline false alarm count.
+  4. For each of `repetitions` randomized runs:
+       - randomly pick injection positions inside the evaluation window
+         (kept away from the edges by EDGE_MARGIN minutes),
+       - inject spike, drift and correlation-break,
+       - run EWMA, MD and OOL on baseline + injected eval,
+       - score detections / false alarms against the ground-truth intervals.
+  5. Aggregate the per-run results into mean +/- std across repetitions.
   6. Print a comparison report and save it to CSV.
 
 Usage
 -----
     python evaluation/run_evaluation.py [--data PATH] [--baseline-ratio 0.5]
-            [--target-fa 0] [--no-calibrate]
+            [--repetitions 30] [--seed 42] [--target-fa ool]
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import os
+import random
 import sys
 from datetime import datetime
 
@@ -34,27 +40,15 @@ if _EVAL_DIR not in sys.path:
 
 from EWMA.cleaning_utils import extract_all_features
 from injection import inject_spike, inject_drift, inject_correlation_break, \
-    dict_to_vector_layout, _default_injection_config
+    dict_to_vector_layout
 from window_split import split_windows, merge_windows
-from calibration import calibrate_all
+from calibration import calibrate_ewma, calibrate_md
 from method_loader import run_method, list_methods
-from metrics import evaluate_raw, format_report
+from metrics import evaluate_raw
 
 
 ######
-# Default thresholds (used when --no-calibrate is passed)
-######
-
-DEFAULT_THRESHOLDS = {
-    "EWMA": 3.0,
-    "OOL": 3.0,
-    "MD": 7.0,
-}
-
-
-######
-# Scenario name -> injection function. Each is run independently: same
-# clean baseline, fresh method state, only this scenario injected.
+# Scenario name -> injection function.
 ######
 
 SCENARIO_INJECTORS = {
@@ -63,59 +57,138 @@ SCENARIO_INJECTORS = {
     "correlation_break": inject_correlation_break,
 }
 
-
 ######
-# Combine three independent single-scenario reports (one per scenario)
-# for one method into a single report with the same shape evaluate()
-# would produce for 3 intervals, so downstream printing/CSV export
-# doesn't need to change.
+# Feature(s) each scenario injects into. Used by metrics._matches_feature
+# to decide whether an alarm on a given feature counts as a detection.
 ######
 
-def _combine_scenario_reports(method_name, scenario_reports):
-    scenario_results = []
-    all_detected = []
-    total_false_alarms = 0
-    total_minutes = 0
+SCENARIO_FEATURES = {
+    "spike": ["cpu_user_pct"],
+    "drift": ["mem_util_pct"],
+    "correlation_break": ["multi"],
+}
 
-    for r in scenario_reports:
-        scenario_results.extend(r['scenario_results'])
-        all_detected.extend(r['all_detected'])
-        total_false_alarms += r['false_alarms']
-        total_minutes += r['total_minutes']
-
-    total_injections = len(scenario_results)
-    detected_count = sum(1 for sr in scenario_results if sr['detected'])
-    detection_rate = detected_count / total_injections if total_injections else 0.0
-
-    delays = [sr['delay_minutes'] for sr in scenario_results if sr['detected']]
-    mean_delay = sum(delays) / len(delays) if delays else None
-
-    hours = total_minutes / 60.0 if total_minutes > 0 else 1.0
-    false_alarm_rate = total_false_alarms / hours
-
-    return {
-        'method': method_name,
-        'total_injections': total_injections,
-        'detected_count': detected_count,
-        'detection_rate': detection_rate,
-        'mean_delay_minutes': mean_delay,
-        'false_alarms': total_false_alarms,
-        'false_alarm_rate_per_hour': false_alarm_rate,
-        'total_minutes': total_minutes,
-        'scenario_results': scenario_results,
-        'all_detected': all_detected,
-    }
+# Keep injection start points at least this many minutes from the
+# edges of the evaluation window so the anomaly has room to develop.
+EDGE_MARGIN = 30
 
 
 ######
-# Run the full comparative evaluation, return dict {method: report}
+# Run one repetition: inject all three scenarios at randomized positions,
+# run every method, return {method: {scenario: report}}.
 ######
 
-def run_evaluation(data_path, baseline_ratio=0.5, target_false_alarms=0,
-                   calibrate=True, output_dir=None):
+def _run(split, thresholds, positions, cfg):
+    eval_start = split['split_index']
+    eval_features = split['eval_features']
+    eval_timestamps = split['eval_timestamps']
+    n_eval = len(eval_timestamps)
+
+    # Apply all three injections to the same eval window copy.
+    injected = {f: list(v) for f, v in eval_features.items()}
+    intervals = []
+    for scenario_name, inject_fn in SCENARIO_INJECTORS.items():
+        params = dict(cfg[scenario_name])
+        params["start_idx"] = positions[scenario_name]
+        res = inject_fn(injected, eval_timestamps, **params)
+        injected = res['features']
+        iv = res['intervals'][0]
+        iv = dict(iv)
+        iv['features'] = SCENARIO_FEATURES[scenario_name]
+        iv['start_idx'] += eval_start
+        iv['end_idx'] += eval_start
+        intervals.append(iv)
+
+    full_features = merge_windows(split['baseline_features'], injected, layout="dict")
+    full_timestamps = list(split['baseline_timestamps']) + list(eval_timestamps)
+
+    reports = {}
+    for method in list_methods():
+        thr = thresholds.get(method)
+        if method == "MD":
+            raw = run_method(
+                method, full_features, full_timestamps, threshold=thr,
+                baseline_features=split['baseline_features'],
+                baseline_timestamps=split['baseline_timestamps'],
+            )
+        else:
+            raw = run_method(method, full_features, full_timestamps, threshold=thr)
+
+        # Score each scenario interval separately so we can aggregate
+        # per scenario across repetitions.
+        per_scenario = {}
+        for iv in intervals:
+            r = evaluate_raw(
+                method_name=method,
+                raw_anomalies=raw,
+                timestamps=full_timestamps,
+                intervals=[iv],
+                total_minutes=n_eval,
+                eval_start=eval_start,
+            )
+            per_scenario[iv['scenario']] = r
+        reports[method] = per_scenario
+    return reports
+
+
+######
+# Aggregate per-run reports into mean +/- std per method/scenario/metric.
+######
+
+def _aggregate(all_runs):
+    methods = list_methods()
+    metrics_keys = ["detected_count", "detection_rate",
+                    "mean_delay_minutes", "false_alarms",
+                    "false_alarm_rate_per_hour"]
+    summary = {}
+    for method in methods:
+        summary[method] = {}
+        for scenario in SCENARIO_INJECTORS:
+            runs = [run[method][scenario] for run in all_runs if scenario in run[method]]
+            if not runs:
+                continue
+            agg = {}
+            for k in metrics_keys:
+                vals = [r[k] for r in runs if r[k] is not None]
+                if not vals:
+                    agg[k] = (None, None)
+                else:
+                    mean = sum(vals) / len(vals)
+                    if len(vals) > 1:
+                        var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
+                        std = var ** 0.5
+                    else:
+                        std = 0.0
+                    agg[k] = (mean, std)
+            summary[method][scenario] = agg
+    return summary
+
+
+######
+# Format one (mean, std) pair.
+######
+
+def _fmt(pair, pct=False, decimals=2):
+    mean, std = pair
+    if mean is None:
+        return "N/A"
+    if pct:
+        return f"{mean * 100:.1f}% +/- {std * 100:.1f}"
+    return f"{mean:.{decimals}f} +/- {std:.{decimals}f}"
+
+
+######
+# Run the full comparative evaluation, return {method: {scenario: agg}}.
+######
+
+def run_evaluation(data_path, baseline_ratio=0.5, repetitions=30, seed=42,
+                   target_fa="ool", spike_mag=5.0, drift_mag=5.0, corr_mag=3.0,
+                   output_dir=None):
     print("=" * 70)
     print("  COMPARATIVE ANOMALY DETECTION EVALUATION")
     print("=" * 70)
+
+    rng = random.Random(seed)
 
     # 1. Load data
     print(f"\n[1] Loading data from {data_path}")
@@ -129,133 +202,159 @@ def run_evaluation(data_path, baseline_ratio=0.5, target_false_alarms=0,
     # 2. Split into baseline / evaluation windows
     print(f"\n[2] Splitting data (baseline ratio = {baseline_ratio})")
     split = split_windows(features, timestamps, baseline_ratio)
+    n_eval = len(split['eval_timestamps'])
     print(f"    Baseline window : {len(split['baseline_timestamps'])} minutes")
-    print(f"    Eval window     : {len(split['eval_timestamps'])} minutes")
+    print(f"    Eval window     : {n_eval} minutes")
 
-    # 3. Calibrate thresholds
-    if calibrate:
-        print(f"\n[3] Calibrating thresholds (target false alarms = {target_false_alarms})")
-        baseline_vectors, _ = dict_to_vector_layout(
-            split['baseline_features'], split['baseline_timestamps'])
-        thresholds = calibrate_all(
-            split['baseline_features'],
-            baseline_vectors,
-            split['baseline_timestamps'],
-            target_false_alarms=target_false_alarms,
-        )
+    # 3. Calibration target: OOL's baseline alarm count (or an explicit int)
+    print(f"\n[3] Calibrating EWMA and MD")
+    ool_baseline_alarms = len(run_method(
+        "OOL", split['baseline_features'], split['baseline_timestamps']))
+    if str(target_fa).lower() == "ool":
+        target = ool_baseline_alarms
     else:
-        print("\n[3] Skipping calibration, using default thresholds")
-        thresholds = dict(DEFAULT_THRESHOLDS)
-    print(f"    Thresholds: {thresholds}")
+        target = int(target_fa)
+    print(f"    OOL baseline alarms = {ool_baseline_alarms}  -> calibration target = {target}")
 
-    # 4. Run spike, drift and correlation-break as three INDEPENDENT
-    #    evaluations. Each uses the same clean baseline, fresh method
-    #    state, and only its own injected scenario -- no state or
-    #    injected values leak between scenarios.
-    print("\n[4] Running each scenario independently (Option A)")
-    cfg = _default_injection_config(len(split['eval_timestamps']))
-    eval_start = split['split_index']
+    ewma_thr = calibrate_ewma(split['baseline_features'],
+                              split['baseline_timestamps'], target)
+    baseline_vectors, _ = dict_to_vector_layout(
+        split['baseline_features'], split['baseline_timestamps'])
+    md_thr = calibrate_md(baseline_vectors,
+                         split['baseline_timestamps'], target)
+    thresholds = {"EWMA": ewma_thr, "MD": md_thr, "OOL": None}
+    print(f"    Thresholds: EWMA={ewma_thr:.4f}  MD={md_thr:.4f}  OOL=static")
 
-    per_method_scenario_reports = {m: [] for m in list_methods()}
-
-    for scenario_name, inject_fn in SCENARIO_INJECTORS.items():
-        injection_result = inject_fn(split['eval_features'], split['eval_timestamps'],
-                                     **cfg[scenario_name])
-        injected_eval = injection_result['features']
-        intervals = injection_result['intervals']
-
-        full_features = merge_windows(split['baseline_features'], injected_eval, layout="dict")
-        full_timestamps = list(split['baseline_timestamps']) + list(split['eval_timestamps'])
-
-        shifted_intervals = [
-            {
-                'start_idx': iv['start_idx'] + eval_start,
-                'end_idx': iv['end_idx'] + eval_start,
-                'scenario': iv['scenario'],
-                'feature': iv['feature'],
-                'description': iv['description'],
-            }
-            for iv in intervals
-        ]
-        iv0 = shifted_intervals[0]
-        print(f"    [{scenario_name}] idx {iv0['start_idx']}-{iv0['end_idx']}  {iv0['description']}")
-
-        for method in list_methods():
-            thr = thresholds[method]
-            if method == "MD":
-                raw_anomalies = run_method(
-                    method, full_features, full_timestamps, threshold=thr,
-                    baseline_features=split['baseline_features'],
-                    baseline_timestamps=split['baseline_timestamps'],
-                )
-            else:
-                raw_anomalies = run_method(method, full_features, full_timestamps, threshold=thr)
-
-            report = evaluate_raw(
-                method_name=method,
-                raw_anomalies=raw_anomalies,
-                timestamps=full_timestamps,
-                intervals=shifted_intervals,
-                total_minutes=len(split['eval_timestamps']),
-            )
-            per_method_scenario_reports[method].append(report)
-
-    # 5. Combine the three independent scenario reports per method
-    reports = {
-        method: _combine_scenario_reports(method, per_method_scenario_reports[method])
-        for method in list_methods()
+    # 4. Injection config (magnitudes from CLI)
+    cfg = {
+        "spike": {"feature": "cpu_user_pct", "duration": 5,
+                  "magnitude": spike_mag, "unit": "std"},
+        "drift": {"feature": "mem_util_pct", "duration": 60,
+                  "total_increase": drift_mag, "unit": "std"},
+        "correlation_break": {"feature_a": "cpu_user_pct",
+                              "feature_b": "sys_load_avg_1",
+                              "duration": 30, "magnitude": corr_mag,
+                              "unit": "std"},
     }
 
-    # 6. Print comparison report
-    print("\n" + "=" * 70)
-    print("  RESULTS")
-    print("=" * 70)
-    for method, report in reports.items():
-        print()
-        print(format_report(report))
+    # 5. Run `repetitions` randomized repetitions
+    print(f"\n[4] Running {repetitions} repetitions (seed={seed})")
+    all_runs = []
+    for rep in range(repetitions):
+        positions = {}
+        for scenario_name, inject_fn in SCENARIO_INJECTORS.items():
+            duration = cfg[scenario_name].get("duration", 30)
+            lo = EDGE_MARGIN
+            hi = max(lo + 1, n_eval - EDGE_MARGIN - duration)
+            positions[scenario_name] = rng.randint(lo, hi)
+        run = _run(split, thresholds, positions, cfg)
+        all_runs.append(run)
+        if (rep + 1) % 5 == 0 or rep == 0 or rep == repetitions - 1:
+            print(f"    rep {rep + 1}/{repetitions} done")
 
-    # 7. Save results to CSV
+    # 6. Aggregate
+    print("\n[5] Aggregating results")
+    summary = _aggregate(all_runs)
+
+    # 7. Print report
+    print("\n" + "=" * 70)
+    print("  RESULTS (mean +/- std over {} repetitions)".format(repetitions))
+    print("=" * 70)
+    for method in list_methods():
+        print(f"\n=== {method} ===")
+        for scenario in SCENARIO_INJECTORS:
+            agg = summary[method].get(scenario, {})
+            if not agg:
+                continue
+            det = agg.get("detected_count", (None, None))
+            rate = agg.get("detection_rate", (None, None))
+            delay = agg.get("mean_delay_minutes", (None, None))
+            fa = agg.get("false_alarms", (None, None))
+            far = agg.get("false_alarm_rate_per_hour", (None, None))
+            print(f"  [{scenario}]")
+            print(f"      detected      : {_fmt(det)} / 1")
+            print(f"      detection rate: {_fmt(rate, pct=True)}")
+            print(f"      delay (min)   : {_fmt(delay)}")
+            print(f"      false alarms  : {_fmt(fa)}")
+            print(f"      FA rate (/h)  : {_fmt(far)}")
+
+    # 8. Save to CSV
     if output_dir is None:
         output_dir = os.path.join(_PROJECT_ROOT, "evaluation", "RESULTS")
     os.makedirs(output_dir, exist_ok=True)
-    _save_reports_csv(reports, output_dir)
+    _save_csv(summary, all_runs, thresholds, cfg, repetitions, seed, target, output_dir)
     print(f"\nResults saved to {output_dir}")
 
-    return reports
+    return summary
 
 
 ######
-# Save the evaluation reports to summary and per-scenario CSV files
+# Save aggregated results, per-run raw results, thresholds and config to CSV.
 ######
 
-def _save_reports_csv(reports, output_dir):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def _save_csv(summary, all_runs, thresholds, cfg, repetitions, seed, target, output_dir):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    summary_path = os.path.join(output_dir, f"summary_{timestamp}.csv")
+    # Per-method/scenario summary (mean +/- std)
+    summary_path = os.path.join(output_dir, f"scenario_summary_{ts}.csv")
     with open(summary_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["method", "total_injections", "detected_count",
-                     "detection_rate", "mean_delay_minutes",
-                     "false_alarms", "false_alarm_rate_per_hour"])
-        for method, r in reports.items():
-            w.writerow([r['method'], r['total_injections'], r['detected_count'],
-                        f"{r['detection_rate']:.4f}",
-                        r['mean_delay_minutes'] if r['mean_delay_minutes'] is not None else "",
-                        r['false_alarms'],
-                        f"{r['false_alarm_rate_per_hour']:.4f}"])
+        w.writerow(["method", "scenario", "repetitions",
+                    "detected_mean", "detected_std",
+                    "detection_rate_mean", "detection_rate_std",
+                    "delay_mean", "delay_std",
+                    "false_alarms_mean", "false_alarms_std",
+                    "fa_rate_mean", "fa_rate_std"])
+        for method in list_methods():
+            for scenario in SCENARIO_INJECTORS:
+                agg = summary[method].get(scenario)
+                if not agg:
+                    continue
+                row = [method, scenario, repetitions]
+                for k in ["detected_count", "detection_rate",
+                          "mean_delay_minutes", "false_alarms",
+                          "false_alarm_rate_per_hour"]:
+                    m, s = agg.get(k, (None, None))
+                    row.append("" if m is None else f"{m:.4f}")
+                    row.append("" if s is None else f"{s:.4f}")
+                w.writerow(row)
 
-    detail_path = os.path.join(output_dir, f"scenarios_{timestamp}.csv")
-    with open(detail_path, "w", newline="", encoding="utf-8") as f:
+    # Per-run raw results (one row per repetition x method x scenario)
+    runs_path = os.path.join(output_dir, f"runs_{ts}.csv")
+    with open(runs_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["method", "scenario", "feature", "detected",
-                     "delay_minutes", "description"])
-        for method, r in reports.items():
-            for sr in r['scenario_results']:
-                iv = sr['interval']
-                w.writerow([r['method'], iv['scenario'], iv['feature'],
-                            sr['detected'],
-                            sr['delay_minutes'] if sr['delay_minutes'] is not None else "",
-                            iv['description']])
+        w.writerow(["repetition", "method", "scenario",
+                    "detected", "detection_rate", "delay_minutes",
+                    "false_alarms", "fa_rate_per_hour"])
+        for rep_idx, run in enumerate(all_runs):
+            for method in list_methods():
+                for scenario in SCENARIO_INJECTORS:
+                    r = run[method].get(scenario)
+                    if r is None:
+                        continue
+                    sr = r['scenario_results'][0] if r['scenario_results'] else None
+                    w.writerow([
+                        rep_idx, method, scenario,
+                        sr['detected'] if sr else "",
+                        f"{r['detection_rate']:.4f}",
+                        sr['delay_minutes'] if sr and sr['delay_minutes'] is not None else "",
+                        r['false_alarms'],
+                        f"{r['false_alarm_rate_per_hour']:.4f}",
+                    ])
+
+    # Config / thresholds
+    config_path = os.path.join(output_dir, f"config_{ts}.csv")
+    with open(config_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["parameter", "value"])
+        w.writerow(["repetitions", repetitions])
+        w.writerow(["seed", seed])
+        w.writerow(["target_fa", target])
+        for m, t in thresholds.items():
+            w.writerow([f"threshold_{m}", "" if t is None else f"{t:.4f}"])
+        for scenario, params in cfg.items():
+            for k, v in params.items():
+                w.writerow([f"{scenario}.{k}", v])
 
 
 ######
@@ -270,10 +369,19 @@ def main():
                              "(default: ../Test_Data/raw_data.csv)")
     parser.add_argument("--baseline-ratio", type=float, default=0.5,
                         help="Fraction of data to use as clean baseline (default: 0.5)")
-    parser.add_argument("--target-fa", type=int, default=0,
-                        help="Target false alarm count on the baseline for calibration (default: 0)")
-    parser.add_argument("--no-calibrate", action="store_true",
-                        help="Skip calibration, use default thresholds")
+    parser.add_argument("--repetitions", type=int, default=30,
+                        help="Number of randomized repetitions (default: 30)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for injection positions (default: 42)")
+    parser.add_argument("--target-fa", default="ool",
+                        help="Calibration target: 'ool' (use OOL baseline alarm "
+                             "count) or an explicit integer (default: ool)")
+    parser.add_argument("--spike-mag", type=float, default=5.0,
+                        help="Spike magnitude in std units (default: 5.0)")
+    parser.add_argument("--drift-mag", type=float, default=5.0,
+                        help="Drift total increase in std units (default: 5.0)")
+    parser.add_argument("--corr-mag", type=float, default=3.0,
+                        help="Correlation break magnitude in std units (default: 3.0)")
     args = parser.parse_args()
 
     if args.data is None:
@@ -282,8 +390,12 @@ def main():
     run_evaluation(
         data_path=args.data,
         baseline_ratio=args.baseline_ratio,
-        target_false_alarms=args.target_fa,
-        calibrate=not args.no_calibrate,
+        repetitions=args.repetitions,
+        seed=args.seed,
+        target_fa=args.target_fa,
+        spike_mag=args.spike_mag,
+        drift_mag=args.drift_mag,
+        corr_mag=args.corr_mag,
     )
 
 
