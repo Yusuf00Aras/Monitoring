@@ -31,7 +31,6 @@ logging.basicConfig(
 
 # Static upper limits, identical to the production Zabbix triggers.
 # Only metrics listed here are monitored by OOL (as in production).
-# TODO: replace with the exact production trigger values.
 LIMITS = {
     "cpu_user_pct": 90.0,
     "cpu_system_pct": 90.0,
