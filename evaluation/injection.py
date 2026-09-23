@@ -128,7 +128,9 @@ def inject_drift(features, timestamps, feature, start_idx, duration=60,
 
 
 ######
-# Break correlation between two metrics: feature_a up, feature_b down
+# Break correlation between two metrics: feature_a up, feature_b down.
+# feature_b is clipped at 0: all monitored metrics (percentages, counts,
+# load averages) are non-negative, so a value below 0 could never occur.
 ######
 
 def inject_correlation_break(features, timestamps, feature_a, feature_b,
@@ -153,7 +155,7 @@ def inject_correlation_break(features, timestamps, feature_a, feature_b,
             off_a = magnitude
             off_b = magnitude
         result[feature_a][i] = result[feature_a][i] + off_a
-        result[feature_b][i] = result[feature_b][i] - off_b
+        result[feature_b][i] = max(0.0, result[feature_b][i] - off_b)
 
     intervals.append({
         'start_idx': start_idx,

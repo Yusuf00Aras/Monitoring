@@ -1,9 +1,11 @@
 """Calibration -- tune each method's threshold to a target false alarm rate.
 
-Each method has a single threshold parameter. By running each method on
-a clean baseline window (no injections) and counting the false alarms,
-we binary-search for the threshold that produces the desired false alarm
-rate. All three methods are then compared at that same rate.
+MD has a single threshold, EWMA one control-limit width L per metric.
+By running each method on a clean baseline window (no injections) and
+counting the false alarms, we binary-search for the threshold(s) that
+produce the desired false alarm budget. For EWMA the budget is split
+evenly over its charts (rounded down), so EWMA as a whole never raises
+more baseline alarms than MD. OOL is not calibrated.
 
 For EWMA and MD, the same baseline window is used both to fit the frozen
 reference and to score it (count false alarms) during calibration --
@@ -108,7 +110,8 @@ def calibrate_all(baseline_dict_features, baseline_vector_features,
                   timestamps, target_false_alarms=0):
     print("Calibrating thresholds to target false alarms =", target_false_alarms)
     ewma_thr = calibrate_ewma(baseline_dict_features, timestamps, target_false_alarms)
-    print(f"  EWMA threshold = {ewma_thr:.4f}")
+    print("  EWMA thresholds (per metric) = "
+          + ", ".join(f"{k}={v:.2f}" for k, v in ewma_thr.items()))
 
     md_thr = calibrate_md(baseline_vector_features, timestamps, target_false_alarms)
     print(f"  MD   threshold = {md_thr:.4f}")

@@ -12,6 +12,11 @@ Because the reference is frozen, a slow drift pushes z_t steadily away
 from mu_0 instead of being absorbed by the chart. One alarm is raised per
 excursion (the first minute above the limit), the same alarm unit as OOL
 and MD.
+
+Every chart has its own control-limit width L. The false alarm budget of
+the method is split evenly over the charts (rounded down), so with a
+budget of 1 alarm and 11 charts each chart is calibrated to 0 baseline
+alarms and EWMA as a whole never exceeds the budget MD gets.
 """
 import os
 import time
@@ -36,6 +41,7 @@ logging.basicConfig(
 
 ALPHA = 0.3
 # Control-limit width L in units of sigma_z (classical value L = 3).
+# Used for every chart unless per-metric limits {feature: L} are given.
 THRESHOLD = 3.0
 POLL_INTERVAL = 60
 
@@ -44,9 +50,10 @@ POLL_INTERVAL = 60
 # monitor only collects data.
 MIN_BASELINE_MINUTES = 720
 
-# Number of alarms the threshold is calibrated to on the clean baseline
-# (same budget as in the evaluation). The live monitor calibrates its
-# threshold automatically unless one is passed explicitly.
+# Number of alarms the method as a whole is calibrated to on the clean
+# baseline (same budget as in the evaluation), split evenly over the
+# charts. The live monitor calibrates its limits automatically unless
+# they are passed explicitly.
 CALIBRATION_TARGET = 1
 
 DB_CONN_PARAMS = {
@@ -102,14 +109,16 @@ def ewma_update(state, value):
 
 
 ######
-# Fit one chart per metric from a baseline dict {feature: [values]}
+# Fit one chart per metric from a baseline dict {feature: [values]}.
+# threshold is one L for all charts or a dict {feature: L}.
 ######
 
 def fit_states(baseline_features, alpha=ALPHA, threshold=THRESHOLD):
     states = {}
     for name, values in baseline_features.items():
         fit = ewma_fit(values)
-        states[name] = ewma_init(fit['mean'], fit['std'], alpha, threshold)
+        L = threshold[name] if isinstance(threshold, dict) else threshold
+        states[name] = ewma_init(fit['mean'], fit['std'], alpha, L)
     return states
 
 
@@ -141,12 +150,12 @@ def run_batch(baseline_features, features, timestamps, alpha=ALPHA, threshold=TH
 
 ######
 # Calibrate L on a clean baseline: binary search for the smallest L that
-# produces at most `target` alarms when the charts are fitted on and run
+# produces at most `target` alarms when the chart(s) are fitted on and run
 # over the baseline itself.
 ######
 
-def calibrate_threshold(baseline_features, timestamps, target=CALIBRATION_TARGET,
-                        alpha=ALPHA, low=0.5, high=100.0, tolerance=0.01, max_iter=50):
+def _calibrate_single(baseline_features, timestamps, target, alpha,
+                      low, high, tolerance, max_iter):
     best = high
     for _ in range(max_iter):
         mid = (low + high) / 2
@@ -162,14 +171,40 @@ def calibrate_threshold(baseline_features, timestamps, target=CALIBRATION_TARGET
 
 
 ######
+# Calibrate one L per metric. The budget `target` is for the whole method
+# and is split evenly over the charts (rounded down), so the charts
+# together never raise more than `target` alarms on the baseline.
+# Returns {feature: L}.
+######
+
+def calibrate_threshold(baseline_features, timestamps, target=CALIBRATION_TARGET,
+                        alpha=ALPHA, low=0.5, high=100.0, tolerance=0.01, max_iter=50):
+    per_chart = target // len(baseline_features)
+    return {name: _calibrate_single({name: values}, timestamps, per_chart, alpha,
+                                    low, high, tolerance, max_iter)
+            for name, values in baseline_features.items()}
+
+
+######
+# Format one L or a dict {feature: L} for logging.
+######
+
+def format_threshold(threshold):
+    if isinstance(threshold, dict):
+        return ", ".join(f"{k}={v:.2f}" for k, v in threshold.items())
+    return f"{threshold:.4f}"
+
+
+######
 # Fit the frozen reference (and calibrate L if threshold is None).
 ######
 
 def _fit_baseline(baseline_features, timestamps, alpha, threshold):
     if threshold is None:
         threshold = calibrate_threshold(baseline_features, timestamps, alpha=alpha)
-        logging.info(f"L calibrated on baseline to {threshold:.4f} "
-                     f"({CALIBRATION_TARGET} baseline alarm(s))")
+        logging.info(f"L calibrated per metric on baseline "
+                     f"(budget {CALIBRATION_TARGET} baseline alarm(s)): "
+                     f"{format_threshold(threshold)}")
     logging.info(f"Baseline fitted from {len(timestamps)} historical minutes; frozen.")
     return fit_states(baseline_features, alpha, threshold), threshold
 
@@ -200,7 +235,7 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=None,
     logging.info(f"Anomalies will be written to {anomalies_dir}/anomalies_YYYY-MM-DD.csv")
 
     logging.info(f"Starting EWMA control chart monitor on {data_path}")
-    logging.info(f"alpha={alpha}, L={'auto' if threshold is None else threshold}, "
+    logging.info(f"alpha={alpha}, L={'auto' if threshold is None else format_threshold(threshold)}, "
                  f"poll={poll_interval}s")
     if use_db:
         logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")

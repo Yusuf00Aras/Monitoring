@@ -5,6 +5,7 @@ Implements the full evaluation pipeline:
   1. Load telemetry data from one server (CSV).
   2. Split into a clean baseline window and an evaluation window.
   3. Calibrate EWMA and MD to the same false alarm budget on baseline.
+     EWMA gets one L per metric, its budget split evenly over the charts.
      OOL is NOT calibrated -- its limits are static. The default budget
      is 1 alarm on the baseline window: OOL's own baseline count (0) is
      degenerate, because EWMA then only reaches it at the search ceiling
@@ -249,7 +250,9 @@ def run_evaluation(data_path, baseline_ratio=0.5, repetitions=30, seed=42,
     md_thr = calibrate_md(baseline_vectors,
                          split['baseline_timestamps'], target)
     thresholds = {"EWMA": ewma_thr, "MD": md_thr, "OOL": None}
-    print(f"    Thresholds: EWMA={ewma_thr:.4f}  MD={md_thr:.4f}  OOL=static")
+    print(f"    Thresholds: MD={md_thr:.4f}  OOL=static")
+    print("    EWMA L per metric: "
+          + ", ".join(f"{k}={v:.2f}" for k, v in ewma_thr.items()))
 
     # 4. Injection config (magnitudes from CLI, sigma = baseline std)
     def base_std(name):
@@ -401,7 +404,11 @@ def _save_csv(summary, all_runs, thresholds, cfg, repetitions, seed, target, out
         w.writerow(["seed", seed])
         w.writerow(["target_fa", target])
         for m, t in thresholds.items():
-            w.writerow([f"threshold_{m}", "" if t is None else f"{t:.4f}"])
+            if isinstance(t, dict):
+                for feature, v in t.items():
+                    w.writerow([f"threshold_{m}.{feature}", f"{v:.4f}"])
+            else:
+                w.writerow([f"threshold_{m}", "" if t is None else f"{t:.4f}"])
         for scenario, params in cfg.items():
             for k, v in params.items():
                 w.writerow([f"{scenario}.{k}", v])
