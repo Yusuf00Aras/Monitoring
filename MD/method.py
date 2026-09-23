@@ -4,6 +4,7 @@ import logging
 from scipy.spatial import distance
 import numpy as np
 from cleaning_utils import extract_important_features
+from sklearn.covariance import MinCovDet
 from sklearn.preprocessing import StandardScaler
 from db_utils import fetch_and_append
 
@@ -34,6 +35,16 @@ logging.basicConfig(
 THRESHOLD = 4.44
 
 POLL_INTERVAL = 60
+
+# Minimum number of historical minutes before the frozen reference is
+# fitted (12 h, same as the evaluation baseline window). Until then the
+# monitor only collects data.
+MIN_BASELINE_MINUTES = 720
+
+# Number of alarms the threshold is calibrated to on the clean baseline
+# (same budget as in the evaluation). The live monitor calibrates its
+# threshold automatically unless one is passed explicitly.
+CALIBRATION_TARGET = 1
 
 
 # Feature names in the exact order produced by extract_important_features()
@@ -96,22 +107,40 @@ def mahalanobis_distances(data, regulator=1e-8, invertible=True):
 
 
 ######
-# Fit MD's frozen reference distribution (mean, inverse covariance) from
-# a clean baseline window. Called once; the result is reused for scoring
+# Fit MD's frozen reference distribution (location, inverse covariance)
+# from a baseline window. Called once; the result is reused for scoring
 # and is never updated afterward -- injected/evaluation data does not
 # change the reference distribution.
+#
+# The baseline cannot be verified to be incident-free, so the Minimum
+# Covariance Determinant (MCD) estimator is used: it fits location and
+# covariance on the MCD_SUPPORT share of most typical minutes and ignores
+# the rest, so a short incident in the baseline (up to ~2 %, i.e. ~14 of
+# 720 minutes) does not distort the reference. A larger discarded share
+# (or median/MAD) would treat the busy part of the normal day cycle as
+# outliers. The features are standardised before fitting only for
+# numerical stability (their scales differ by ~1e11); the Mahalanobis
+# distance itself is scale-invariant.
 ######
+
+MCD_SUPPORT = 0.98
+
 
 def md_fit(baseline_vectors, regulator=1e-8):
     X = np.asarray(baseline_vectors, dtype=float)
-    mean = np.mean(X, axis=0)
-    cov = np.cov(X, rowvar=False)
-    cov_reg = cov + regulator * np.eye(cov.shape[0])
+    scale = np.std(X, axis=0, ddof=1)
+    scale[scale == 0] = 1.0
+    mcd = MinCovDet(support_fraction=MCD_SUPPORT, random_state=0).fit(X / scale)
+
+    cov_reg = mcd.covariance_ + regulator * np.eye(X.shape[1])
     try:
-        inv_cov = np.linalg.inv(cov_reg)
+        inv_scaled = np.linalg.inv(cov_reg)
     except np.linalg.LinAlgError:
-        inv_cov = np.linalg.pinv(cov_reg)
-    return {'mean': mean, 'inv_cov': inv_cov}
+        inv_scaled = np.linalg.pinv(cov_reg)
+
+    # Back to the original feature scale: S = D C D  =>  S^-1 = D^-1 C^-1 D^-1.
+    inv_cov = inv_scaled / np.outer(scale, scale)
+    return {'mean': mcd.location_ * scale, 'inv_cov': inv_cov}
 
 
 ######
@@ -175,14 +204,51 @@ def run_batch(baseline_vectors, features, timestamps, threshold=THRESHOLD, regul
 
 
 ######
+# Calibrate the MD threshold on a clean baseline: binary search for the
+# smallest threshold that produces at most `target` alarms when the
+# reference is fitted on and scored over the baseline itself.
+######
+
+def calibrate_threshold(baseline_vectors, timestamps, target=CALIBRATION_TARGET,
+                        low=0.5, high=50.0, tolerance=0.01, max_iter=50, regulator=1e-8):
+    best = high
+    for _ in range(max_iter):
+        mid = (low + high) / 2
+        n_alarms = len(run_batch(baseline_vectors, baseline_vectors, timestamps,
+                                 threshold=mid, regulator=regulator))
+        if n_alarms <= target:
+            best = high = mid
+        else:
+            low = mid
+        if high - low < tolerance:
+            break
+    return best
+
+
+######
+# Fit the frozen reference (and calibrate the threshold if it is None).
+######
+
+def _fit_baseline(baseline_vectors, timestamps, threshold, regulator):
+    if threshold is None:
+        threshold = calibrate_threshold(baseline_vectors, timestamps, regulator=regulator)
+        logging.info(f"Threshold calibrated on baseline to {threshold:.4f} "
+                     f"({CALIBRATION_TARGET} baseline alarm(s))")
+    fit = md_fit(baseline_vectors, regulator)
+    logging.info(f"Baseline fitted from {len(baseline_vectors)} historical minutes; frozen.")
+    return md_init(fit['mean'], fit['inv_cov'], threshold), threshold
+
+
+######
 # Live monitor: fits the reference distribution once from whatever
 # historical data already exists in the CSV, then scores all subsequent
 # (including newly polled) data against that fixed distribution.
+# threshold=None calibrates the threshold automatically on that baseline.
 ######
 
 def run_monitor(
     data_path=DATA_PATH,
-    threshold=THRESHOLD,
+    threshold=None,
     poll_interval=POLL_INTERVAL,
     use_db=USE_DB,
     conn_params=DB_CONN_PARAMS,
@@ -192,18 +258,18 @@ def run_monitor(
     seen = set(seen_timestamps)
 
     state = None
-    if baseline_vectors:
-        fit = md_fit(baseline_vectors, regulator)
-        state = md_init(fit['mean'], fit['inv_cov'], threshold)
-        logging.info(f"Baseline fitted from {len(baseline_vectors)} historical minutes; frozen.")
+    if len(baseline_vectors) >= MIN_BASELINE_MINUTES:
+        state, threshold = _fit_baseline(baseline_vectors, seen_timestamps, threshold, regulator)
     else:
-        logging.info("CSV is empty -- baseline will be fitted once enough data has accumulated.")
+        logging.info(f"{len(baseline_vectors)} historical minutes -- baseline will be fitted "
+                     f"once {MIN_BASELINE_MINUTES} minutes have accumulated.")
 
     anomalies_dir = os.path.join(_BASE_DIR, 'ANOMALIES')
     os.makedirs(anomalies_dir, exist_ok=True)
     logging.info(f"Anomalies will be written to {anomalies_dir}/anomalies_YYYY-MM-DD.csv")
     logging.info(f"Starting Mahalanobis monitor on {data_path}")
-    logging.info(f"threshold={threshold}, poll={poll_interval}s (reference distribution frozen at fit time)")
+    logging.info(f"threshold={'auto' if threshold is None else threshold}, poll={poll_interval}s "
+                 "(reference distribution frozen at fit time)")
 
     if use_db:
         logging.info(
@@ -224,11 +290,10 @@ def run_monitor(
         current_features, current_timestamps = extract_important_features(data_path)
 
         if state is None:
-            if current_features:
-                fit = md_fit(current_features, regulator)
-                state = md_init(fit['mean'], fit['inv_cov'], threshold)
+            if len(current_features) >= MIN_BASELINE_MINUTES:
+                state, threshold = _fit_baseline(current_features, current_timestamps,
+                                                 threshold, regulator)
                 seen = set(current_timestamps)
-                logging.info(f"Baseline fitted from {len(current_features)} historical minutes; frozen.")
             time.sleep(poll_interval)
             continue
 

@@ -3,7 +3,7 @@ repetitions,30
 seed,42
 target_fa,1
 threshold_EWMA,9.6034
-threshold_MD,10.2103
+threshold_MD,22.8330
 threshold_OOL,
 spike.feature,cpu_user_pct
 spike.duration,5

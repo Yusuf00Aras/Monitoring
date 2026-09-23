@@ -31,11 +31,11 @@ The results demonstrate that the monitoring infrastructure works end-to-end, as 
 
 \subsection{Controlled Anomaly Testing}
 \label{sec:controlled}
-The controlled experiments use one day of telemetry from the examined server (07.08.2026, 1{,}439 minutes). The first 719 minutes (00:00--11:58) form the clean baseline window and the remaining 720 minutes (11:59--23:59) form the evaluation window. The Python mask injects the anomaly into the evaluation window and records its exact start and end, which provides the ground truth for detection rate and detection delay. Each scenario is repeated 30 times at a randomly chosen start minute (fixed seed, at least 30 minutes away from the window edges). Only one scenario is injected per run, so injections never overlap, and all three methods receive identical data in every run.
+The controlled experiments use one day of telemetry from the examined server (07.08.2026, 1{,}439 minutes). The first 719 minutes (00:00--11:58) form the baseline window and the remaining 720 minutes (11:59--23:59) form the evaluation window. The Python mask injects the anomaly into the evaluation window and records its exact start and end, which provides the ground truth for detection rate and detection delay. Each scenario is repeated 30 times at a randomly chosen start minute (fixed seed, at least 30 minutes away from the window edges). Only one scenario is injected per run, so injections never overlap, and all three methods receive identical data in every run.
 
-OOL keeps its static configuration: an upper limit of 90\,\% on \texttt{user.pct}, \texttt{system.pct}, \texttt{iowait.pct}, memory \texttt{util.pct} and \texttt{swap\_used.pct}, which must be exceeded for 5 consecutive minutes. OOL is not calibrated and raises no alarm on the baseline window. EWMA is implemented as a control chart with $\alpha = 0.3$: the smoothed value of each metric is compared with the mean of the baseline window, and an alarm is raised when it deviates by more than $L$ standard deviations of the EWMA statistic. MD uses the mean and covariance of the baseline window. For both, the reference is estimated once on the baseline and then kept fixed. Calibrating EWMA and MD to exactly zero baseline alarms is not meaningful, because the threshold search then only ends at its upper limit. Both are therefore calibrated to the smallest non-zero budget of one false alarm on the baseline window, which results in $L = 9.60$ for EWMA and a threshold of 10.21 for MD. Both values are considerably higher than the theoretical reference values ($L=3$ and $\sqrt{19.68} \approx 4.44$), because the server metrics contain large natural deviations; on the baseline, every metric's EWMA statistic deviates by 6.5 to 9.7 standard deviations at some point.
+OOL keeps its static configuration: an upper limit of 90\,\% on \texttt{user.pct}, \texttt{system.pct}, \texttt{iowait.pct}, memory \texttt{util.pct} and \texttt{swap\_used.pct}, which must be exceeded for 5 consecutive minutes. OOL is not calibrated and raises no alarm on the baseline window. EWMA is implemented as a control chart with $\alpha = 0.3$: the smoothed value of each metric is compared with the mean of the baseline window, and an alarm is raised when it deviates by more than $L$ standard deviations of the EWMA statistic. MD compares each minute with the location and covariance of the baseline window. As it cannot be verified that the baseline is free of incidents, MD estimates them with the Minimum Covariance Determinant, which uses the 98\,\% most typical baseline minutes and ignores the remaining 2\,\% (about 14 minutes), so that a short incident in the baseline does not distort the reference. For both methods, the reference is estimated once on the baseline and then kept fixed. Calibrating EWMA and MD to exactly zero baseline alarms is not meaningful, because the threshold search then only ends at its upper limit. Both are therefore calibrated to the smallest non-zero budget of one false alarm on the baseline window, which results in $L = 9.60$ for EWMA and a threshold of 22.83 for MD. Both values are considerably higher than the theoretical reference values ($L=3$ and $\sqrt{19.68} \approx 4.44$), because the server metrics contain large natural deviations; on the baseline, every metric's EWMA statistic deviates by 6.5 to 9.7 standard deviations at some point.
 
-The injection magnitude is given in multiples of $\sigma$, the standard deviation of the injected metric in the baseline window, so every run injects the same absolute amount. For all methods, one alarm is counted per excursion, that is, consecutive alarm minutes form one alarm. An alarm counts as a detection if it occurs within the injection interval, concerns an injected metric (MD alarms refer to all metrics and always qualify) and does not also occur when the method runs on the same data without injection. All other alarms in the evaluation window are counted as false alarms. On the uninjected evaluation window, EWMA and OOL raise no alarm and MD raises three. The tables report the mean and standard deviation over the 30 runs, with false alarms per 720-minute evaluation window.
+The injection magnitude is given in multiples of $\sigma$, the standard deviation of the injected metric in the baseline window, so every run injects the same absolute amount. For all methods, one alarm is counted per excursion, that is, consecutive alarm minutes form one alarm. An alarm counts as a detection if it occurs within the injection interval, concerns an injected metric (MD alarms refer to all metrics and always qualify) and does not also occur when the method runs on the same data without injection. All other alarms in the evaluation window are counted as false alarms. On the uninjected evaluation window, none of the three methods raises an alarm, so all methods are compared at the same false-alarm rate. The tables report the mean and standard deviation over the 30 runs, with false alarms per 720-minute evaluation window.
 
 \subsubsection{Instant Spikes}
 For the instant spike, \texttt{user.pct} is raised by $5\sigma$ for 5 minutes, which corresponds to an increase of 17.1 percentage points.
@@ -46,9 +46,9 @@ For the instant spike, \texttt{user.pct} is raised by $5\sigma$ for 5 minutes, w
 \toprule
 \textbf{Method} & \textbf{Detection Rate} & \textbf{Avg. Detection Delay} & \textbf{False Alarms} \\
 \midrule
-EWMA & 6.7\,\% (2/30)   & 4.0 min & $0.00 \pm 0.00$ \\
-MD   & 100.0\,\% (30/30) & 0.0 min & $3.00 \pm 0.00$ \\
-OOL  & 0.0\,\% (0/30)   & --      & $0.00 \pm 0.00$ \\
+EWMA & 6.7\,\% (2/30)    & 4.0 min & $0.00 \pm 0.00$ \\
+MD   & 100.0\,\% (30/30) & 0.0 min & $0.00 \pm 0.00$ \\
+OOL  & 0.0\,\% (0/30)    & --      & $0.00 \pm 0.00$ \\
 \bottomrule
 \end{tabularx}
 \caption{Detection results for the instant spike experiments (30 runs)}
@@ -67,7 +67,7 @@ For the slow drift, memory \texttt{util.pct} is increased linearly by $5\sigma$ 
 \textbf{Method} & \textbf{Detection Rate} & \textbf{Avg. Detection Delay} & \textbf{False Alarms} \\
 \midrule
 EWMA & 100.0\,\% (30/30) & $53.6 \pm 5.5$ min & $0.00 \pm 0.00$ \\
-MD   & 96.7\,\% (29/30)  & $25.6 \pm 4.0$ min & $2.63 \pm 0.49$ \\
+MD   & 100.0\,\% (30/30) & $39.1 \pm 8.0$ min & $0.00 \pm 0.00$ \\
 OOL  & 0.0\,\% (0/30)    & --                 & $0.00 \pm 0.00$ \\
 \bottomrule
 \end{tabularx}
@@ -75,7 +75,7 @@ OOL  & 0.0\,\% (0/30)    & --                 & $0.00 \pm 0.00$ \\
 \label{tab:slow_drift_results}
 \end{table}
 
-EWMA detected all 30 drifts and MD 29 of 30. MD, however, detected the drift after 25.6 minutes on average, about half of the delay of EWMA (53.6 minutes), when the drift had reached less than half of its final size. OOL detected none of the drifts, as memory utilisation stayed around 30--50\,\%.
+EWMA and MD both detected all 30 drifts. MD detected them after 39.1 minutes on average, about 15 minutes earlier than EWMA (53.6 minutes) and before the ramp was complete. OOL detected none of the drifts, as memory utilisation stayed around 30--50\,\%.
 
 \subsubsection{Correlated Anomalies}
 For the correlated anomaly, the usual relationship between CPU and system load is broken for 30 minutes: \texttt{user.pct} is raised by $3\sigma$ (10.3 percentage points) while \texttt{load\_avg\_1} is lowered by $3\sigma$ (2.27).
@@ -87,7 +87,7 @@ For the correlated anomaly, the usual relationship between CPU and system load i
 \textbf{Method} & \textbf{Detection Rate} & \textbf{Avg. Detection Delay} & \textbf{False Alarms} \\
 \midrule
 EWMA & 0.0\,\% (0/30)    & --      & $0.00 \pm 0.00$ \\
-MD   & 100.0\,\% (30/30) & 0.0 min & $2.93 \pm 0.25$ \\
+MD   & 100.0\,\% (30/30) & 0.0 min & $0.00 \pm 0.00$ \\
 OOL  & 0.0\,\% (0/30)    & --      & $0.00 \pm 0.00$ \\
 \bottomrule
 \end{tabularx}
@@ -107,15 +107,15 @@ Table~\ref{tab:overall_results} combines the results of all three experiments.
 \textbf{Scenario} & \textbf{Method} & \textbf{Detection Rate} & \textbf{Mean Delay} & \textbf{False Alarms} \\
 \midrule
 Instant Spike & EWMA & 6.7\,\%   & 4.0 min  & 0.00 \\
-              & MD   & 100.0\,\% & 0.0 min  & 3.00 \\
+              & MD   & 100.0\,\% & 0.0 min  & 0.00 \\
               & OOL  & 0.0\,\%   & --       & 0.00 \\
 \midrule
 Slow Drift    & EWMA & 100.0\,\% & 53.6 min & 0.00 \\
-              & MD   & 96.7\,\%  & 25.6 min & 2.63 \\
+              & MD   & 100.0\,\% & 39.1 min & 0.00 \\
               & OOL  & 0.0\,\%   & --       & 0.00 \\
 \midrule
 Correlated    & EWMA & 0.0\,\%   & --       & 0.00 \\
-              & MD   & 100.0\,\% & 0.0 min  & 2.93 \\
+              & MD   & 100.0\,\% & 0.0 min  & 0.00 \\
               & OOL  & 0.0\,\%   & --       & 0.00 \\
 \bottomrule
 \end{tabularx}
@@ -123,7 +123,7 @@ Correlated    & EWMA & 0.0\,\%   & --       & 0.00 \\
 \label{tab:overall_results}
 \end{table}
 
-MD detected 89 of 90 injections, in most cases within the first minute. EWMA detected all slow drifts but almost no spikes and no correlation breaks, and OOL detected none of the 90 injections. The false alarms differ between the methods: although all methods were calibrated to the same budget on the baseline, MD raised about three false alarms per evaluation window (about 0.25 per hour), whereas EWMA and OOL raised none.
+MD detected all 90 injections, spikes and correlation breaks within the first minute. EWMA detected all slow drifts but almost no spikes and no correlation breaks, and OOL detected none of the 90 injections. None of the methods raised a false alarm in the evaluation window.
 
 To check how the results depend on the injection size, all experiments were repeated with half the magnitude ($2.5\sigma$ spike and drift, $1.5\sigma$ correlation break) and unchanged thresholds (Table~\ref{tab:magnitude_results}).
 
@@ -133,29 +133,29 @@ To check how the results depend on the injection size, all experiments were repe
 \toprule
 \textbf{Scenario} & \textbf{EWMA} & \textbf{MD} & \textbf{OOL} \\
 \midrule
-Instant Spike ($2.5\sigma$) & 0.0\,\% & 100.0\,\% (0.0 min)  & 0.0\,\% \\
-Slow Drift ($2.5\sigma$)    & 0.0\,\% & 100.0\,\% (50.2 min) & 0.0\,\% \\
-Correlated ($1.5\sigma$)    & 0.0\,\% & 100.0\,\% (4.9 min)  & 0.0\,\% \\
+Instant Spike ($2.5\sigma$) & 0.0\,\% & 96.7\,\% (1.4 min)  & 0.0\,\% \\
+Slow Drift ($2.5\sigma$)    & 0.0\,\% & 73.3\,\% (72.8 min) & 0.0\,\% \\
+Correlated ($1.5\sigma$)    & 0.0\,\% & 20.0\,\% (12.5 min) & 0.0\,\% \\
 \bottomrule
 \end{tabularx}
-\caption{Detection rate (mean delay) with halved injection magnitudes (30 runs per scenario)}
+\caption{Detection rate (mean delay) with halved injection magnitudes (30 runs per scenario, no false alarms for any method)}
 \label{tab:magnitude_results}
 \end{table}
 
-With halved injections, MD still detected all 90 anomalies, only with longer delays for the drift and the correlation break, while EWMA and OOL detected none.
+With halved injections, MD still detected nearly all spikes, about three quarters of the drifts and a fifth of the correlation breaks, while EWMA and OOL detected none.
 
 \subsection{Evaluation of the Hypotheses}
 
 \subsubsection{H1: Slow Drift Detection}
-H1 expected EWMA to detect slow drifts earlier and with a higher detection rate than MD and OOL at the same false-alarm rate. Compared to OOL, this holds: EWMA detected all 30 drifts, OOL none, and both raised no false alarm (Table~\ref{tab:slow_drift_results}). Compared to MD, it does not hold: MD detected nearly the same share of drifts (29 instead of 30) but after 25.6 instead of 53.6 minutes, and at half the drift size EWMA detected none while MD still detected all (Table~\ref{tab:magnitude_results}). As MD raised about three false alarms per evaluation window, part of this advantage can be attributed to its higher false-alarm level. \textbf{H1 is not supported}, since EWMA is not earlier than MD.
+H1 expected EWMA to detect slow drifts earlier and with a higher detection rate than MD and OOL at the same false-alarm rate. All three methods raised no false alarm, so the condition of the same false-alarm rate is fulfilled. Compared to OOL, EWMA performed as expected: it detected all 30 drifts, OOL none (Table~\ref{tab:slow_drift_results}). Compared to MD, it did not: both detected all drifts, but MD did so about 15 minutes earlier (39.1 instead of 53.6 minutes), and at half the drift size EWMA detected none of the drifts while MD detected 73.3\,\% (Table~\ref{tab:magnitude_results}). \textbf{H1 is not supported}, since EWMA is neither earlier nor more reliable than MD.
 
 \subsubsection{H2: Correlated Anomalies}
-H2 expected MD to detect abnormal combinations of metrics that remain undetected by EWMA and OOL. In the correlation-break experiment, MD detected all 30 injections in the first minute, while EWMA and OOL detected none, although \texttt{user.pct} alone rose by more than ten percentage points (Table~\ref{tab:correlated_results}). With a break of only $1.5\sigma$, MD again detected all 30 injections and the other two methods none (Table~\ref{tab:magnitude_results}). \textbf{H2 is supported.}
+H2 expected MD to detect abnormal combinations of metrics that remain undetected by EWMA and OOL. In the correlation-break experiment, MD detected all 30 injections in the first minute, while EWMA and OOL detected none, although \texttt{user.pct} alone rose by more than ten percentage points (Table~\ref{tab:correlated_results}). With a break of only $1.5\sigma$, MD still detected 6 of 30 injections and the other two methods none (Table~\ref{tab:magnitude_results}). Every correlation break that was detected was therefore detected by MD alone. \textbf{H2 is supported.}
 
 \subsubsection{H3: Improvement over OOL}
-H3 expected that neither method improves detection substantially compared to OOL. OOL detected none of the 90 injections, because no injected anomaly came close to its 90\,\% limits. EWMA raised the detection rate for slow drifts from 0\,\% to 100\,\% at the same false-alarm level as OOL (none in the evaluation window), but hardly improved the detection of spikes and correlation breaks. MD raised the detection rate from 0\,\% to 97--100\,\% in all three scenarios, at the cost of about three false alarms per 12 hours. Both improvements clearly exceed a difference that could be explained by the one-minute sampling interval. \textbf{H3 is rejected for both methods}; for EWMA, the improvement is limited to slow drifts.
+H3 expected that neither method improves detection substantially compared to OOL. OOL detected none of the 90 injections, because no injected anomaly came close to its 90\,\% limits. EWMA raised the detection rate for slow drifts from 0\,\% to 100\,\%, but hardly improved the detection of spikes and correlation breaks. MD raised the detection rate from 0\,\% to 100\,\% in all three scenarios. Both improvements were achieved without any additional false alarm and clearly exceed a difference that could be explained by the one-minute sampling interval. \textbf{H3 is rejected for both methods}; for EWMA, the improvement is limited to slow drifts.
 
 \subsection{Answer to the Research Question}
-The research question asked to what extent EWMA and MD improve the anomaly detection of the current OOL monitoring, measured by detection rate, detection delay and false alarms. In the controlled experiments, the static OOL monitoring did not detect any of the injected anomalies, because none of them came close to its 90\,\% limits. EWMA improved the detection of slow drifts from 0\,\% to 100\,\% without additional false alarms, with an average delay of about 54 minutes, but hardly detected spikes and did not detect correlation breaks. MD improved the detection of all three anomaly types to 97--100\,\%, detected spikes and correlation breaks within the first minute and drifts after about 26 minutes, and remained reliable at half the anomaly size.
+The research question asked to what extent EWMA and MD improve the anomaly detection of the current OOL monitoring, measured by detection rate, detection delay and false alarms. In the controlled experiments, the static OOL monitoring did not detect any of the injected anomalies, because none of them came close to its 90\,\% limits. EWMA improved the detection of slow drifts from 0\,\% to 100\,\% with an average delay of about 54 minutes, but hardly detected spikes and did not detect correlation breaks. MD improved the detection of all three anomaly types from 0\,\% to 100\,\%, detected spikes and correlation breaks within the first minute and drifts after about 39 minutes, and still detected most spikes and drifts at half the anomaly size.
 
-The improvement of MD comes at the cost of about three false alarms per 12 hours, compared to none for OOL and EWMA. This matches the end-to-end test with stress-ng, in which EWMA and MD also detected memory and I/O stress that OOL missed. In summary, both methods improve the current monitoring for anomalies that stay within the normal value range of the individual metrics: EWMA for slow drifts without additional false alarms, and MD for all three examined anomaly types with a small number of additional false alarms.
+Both improvements were achieved without a single false alarm in the evaluation window, the same as OOL. This matches the end-to-end test with stress-ng, in which EWMA and MD also detected memory and I/O stress that OOL missed. In summary, both methods improve the current monitoring for anomalies that stay within the normal value range of the individual metrics: EWMA for slow drifts, and MD for all three examined anomaly types.

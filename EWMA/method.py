@@ -39,6 +39,16 @@ ALPHA = 0.3
 THRESHOLD = 3.0
 POLL_INTERVAL = 60
 
+# Minimum number of historical minutes before the frozen reference is
+# fitted (12 h, same as the evaluation baseline window). Until then the
+# monitor only collects data.
+MIN_BASELINE_MINUTES = 720
+
+# Number of alarms the threshold is calibrated to on the clean baseline
+# (same budget as in the evaluation). The live monitor calibrates its
+# threshold automatically unless one is passed explicitly.
+CALIBRATION_TARGET = 1
+
 DB_CONN_PARAMS = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'port': os.environ.get('DB_PORT', '5432'),
@@ -130,22 +140,58 @@ def run_batch(baseline_features, features, timestamps, alpha=ALPHA, threshold=TH
 
 
 ######
-# Live monitor: fits the reference once from the historical data already
-# in the CSV, then charts all subsequent (newly polled) minutes.
+# Calibrate L on a clean baseline: binary search for the smallest L that
+# produces at most `target` alarms when the charts are fitted on and run
+# over the baseline itself.
 ######
 
-def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
+def calibrate_threshold(baseline_features, timestamps, target=CALIBRATION_TARGET,
+                        alpha=ALPHA, low=0.5, high=100.0, tolerance=0.01, max_iter=50):
+    best = high
+    for _ in range(max_iter):
+        mid = (low + high) / 2
+        n_alarms = len(run_batch(baseline_features, baseline_features, timestamps,
+                                 alpha=alpha, threshold=mid))
+        if n_alarms <= target:
+            best = high = mid
+        else:
+            low = mid
+        if high - low < tolerance:
+            break
+    return best
+
+
+######
+# Fit the frozen reference (and calibrate L if threshold is None).
+######
+
+def _fit_baseline(baseline_features, timestamps, alpha, threshold):
+    if threshold is None:
+        threshold = calibrate_threshold(baseline_features, timestamps, alpha=alpha)
+        logging.info(f"L calibrated on baseline to {threshold:.4f} "
+                     f"({CALIBRATION_TARGET} baseline alarm(s))")
+    logging.info(f"Baseline fitted from {len(timestamps)} historical minutes; frozen.")
+    return fit_states(baseline_features, alpha, threshold), threshold
+
+
+######
+# Live monitor: fits the reference once from the historical data already
+# in the CSV, then charts all subsequent (newly polled) minutes.
+# threshold=None calibrates L automatically on that baseline.
+######
+
+def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=None,
                 poll_interval=POLL_INTERVAL, use_db=USE_DB,
                 conn_params=DB_CONN_PARAMS):
     baseline_features, seen_timestamps = extract_all_features(data_path)
     seen = set(seen_timestamps)
 
     states = None
-    if seen_timestamps:
-        states = fit_states(baseline_features, alpha, threshold)
-        logging.info(f"Baseline fitted from {len(seen_timestamps)} historical minutes; frozen.")
+    if len(seen_timestamps) >= MIN_BASELINE_MINUTES:
+        states, threshold = _fit_baseline(baseline_features, seen_timestamps, alpha, threshold)
     else:
-        logging.info("CSV is empty -- baseline will be fitted once enough data has accumulated.")
+        logging.info(f"{len(seen_timestamps)} historical minutes -- baseline will be fitted "
+                     f"once {MIN_BASELINE_MINUTES} minutes have accumulated.")
 
     # Anomalies are written to per-day CSV files (anomalies_YYYY-MM-DD.csv)
     # so every day gets its own file for easier inspection.
@@ -154,7 +200,8 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
     logging.info(f"Anomalies will be written to {anomalies_dir}/anomalies_YYYY-MM-DD.csv")
 
     logging.info(f"Starting EWMA control chart monitor on {data_path}")
-    logging.info(f"alpha={alpha}, L={threshold}, poll={poll_interval}s")
+    logging.info(f"alpha={alpha}, L={'auto' if threshold is None else threshold}, "
+                 f"poll={poll_interval}s")
     if use_db:
         logging.info(f"DB fetch enabled: {conn_params['host']}:{conn_params['port']}/{conn_params['dbname']}")
     logging.info("Waiting for new minute data...")
@@ -171,10 +218,10 @@ def run_monitor(data_path=DATA_PATH, alpha=ALPHA, threshold=THRESHOLD,
         current_features, current_timestamps = extract_all_features(data_path)
 
         if states is None:
-            if current_timestamps:
-                states = fit_states(current_features, alpha, threshold)
+            if len(current_timestamps) >= MIN_BASELINE_MINUTES:
+                states, threshold = _fit_baseline(current_features, current_timestamps,
+                                                  alpha, threshold)
                 seen = set(current_timestamps)
-                logging.info(f"Baseline fitted from {len(current_timestamps)} historical minutes; frozen.")
             time.sleep(poll_interval)
             continue
 

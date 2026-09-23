@@ -79,17 +79,12 @@ def calibrate_threshold(run_fn, features, timestamps, target_false_alarms=0,
 
 def calibrate_ewma(features, timestamps, target_false_alarms=0,
                    alpha=None, **kwargs):
+    # Same procedure the live EWMA monitor uses (EWMA/method.py).
     mod = _import_method_module("EWMA")
     if alpha is None:
         alpha = mod.ALPHA
-
-    def run_fn(threshold, features, timestamps):
-        return mod.run_batch(features, features, timestamps, alpha=alpha,
-                             threshold=threshold)
-
-    return calibrate_threshold(run_fn, features, timestamps,
-                               target_false_alarms,
-                               threshold_low=0.5, threshold_high=100.0, **kwargs)
+    return mod.calibrate_threshold(features, timestamps, target_false_alarms,
+                                   alpha=alpha, **kwargs)
 
 
 ######
@@ -99,14 +94,9 @@ def calibrate_ewma(features, timestamps, target_false_alarms=0,
 ######
 
 def calibrate_md(features, timestamps, target_false_alarms=0, **kwargs):
+    # Same procedure the live MD monitor uses (MD/method.py).
     mod = _import_method_module("MD")
-
-    def run_fn(threshold, features, timestamps):
-        return mod.run_batch(features, features, timestamps, threshold=threshold)
-
-    return calibrate_threshold(run_fn, features, timestamps,
-                               target_false_alarms,
-                               threshold_low=0.5, threshold_high=50.0, **kwargs)
+    return mod.calibrate_threshold(features, timestamps, target_false_alarms, **kwargs)
 
 
 ######

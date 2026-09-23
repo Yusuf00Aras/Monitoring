@@ -25,7 +25,10 @@ Implements the full evaluation pipeline:
 Usage
 -----
     python evaluation/run_evaluation.py [--data PATH] [--baseline-ratio 0.5]
-            [--repetitions 30] [--seed 42] [--target-fa 1]
+            [--repetitions 30] [--seed 42] [--target-fa 1] [--wait-minutes 1440]
+
+    --wait-minutes 1440 waits until 24 h of data exist, then evaluates
+    exactly the most recent 1440 minutes (12 h baseline + 12 h evaluation).
 """
 from __future__ import annotations
 
@@ -34,6 +37,7 @@ import csv
 import os
 import random
 import sys
+import time
 from datetime import datetime
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -201,7 +205,7 @@ def _fmt(pair, pct=False, decimals=2):
 
 def run_evaluation(data_path, baseline_ratio=0.5, repetitions=30, seed=42,
                    target_fa="1", spike_mag=5.0, drift_mag=5.0, corr_mag=3.0,
-                   output_dir=None):
+                   output_dir=None, max_minutes=None):
     print("=" * 70)
     print("  COMPARATIVE ANOMALY DETECTION EVALUATION")
     print("=" * 70)
@@ -211,6 +215,10 @@ def run_evaluation(data_path, baseline_ratio=0.5, repetitions=30, seed=42,
     # 1. Load data
     print(f"\n[1] Loading data from {data_path}")
     features, timestamps = extract_all_features(data_path)
+    if max_minutes is not None and len(timestamps) > max_minutes:
+        # Keep only the most recent max_minutes minutes.
+        timestamps = timestamps[-max_minutes:]
+        features = {k: v[-max_minutes:] for k, v in features.items()}
     n = len(timestamps)
     print(f"    {n} minutes, {len(features)} features")
     if n == 0:
@@ -400,6 +408,27 @@ def _save_csv(summary, all_runs, thresholds, cfg, repetitions, seed, target, out
 
 
 ######
+# Block until the data file holds at least `minutes` complete minutes
+# (used to start the evaluation automatically once enough data has been
+# collected by the live monitors, e.g. from a systemd service).
+######
+
+WAIT_POLL_SECONDS = 600
+
+
+def _wait_for_minutes(data_path, minutes, poll_seconds=WAIT_POLL_SECONDS):
+    while True:
+        have = len(extract_all_features(data_path)[1]) if os.path.exists(data_path) else 0
+        if have >= minutes:
+            print(f"{have} minutes available (need {minutes}) -- starting evaluation",
+                  flush=True)
+            return
+        print(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {have}/{minutes} minutes available, "
+              f"checking again in {poll_seconds // 60} min", flush=True)
+        time.sleep(poll_seconds)
+
+
+######
 # CLI entry point
 ######
 
@@ -425,12 +454,22 @@ def main():
                         help="Drift total increase in std units (default: 5.0)")
     parser.add_argument("--corr-mag", type=float, default=3.0,
                         help="Correlation break magnitude in std units (default: 3.0)")
+    parser.add_argument("--wait-minutes", type=int, default=0,
+                        help="Wait until the data file holds at least this many complete "
+                             "minutes, then evaluate exactly the most recent N minutes "
+                             "(e.g. 1440 = 24 h; default: 0 = start immediately, use all data)")
     args = parser.parse_args()
 
     if args.data is None:
         args.data = os.path.join(_PROJECT_ROOT, "Test_Data", "raw_data.csv")
 
+    max_minutes = None
+    if args.wait_minutes > 0:
+        _wait_for_minutes(args.data, args.wait_minutes)
+        max_minutes = args.wait_minutes
+
     run_evaluation(
+        max_minutes=max_minutes,
         data_path=args.data,
         baseline_ratio=args.baseline_ratio,
         repetitions=args.repetitions,
