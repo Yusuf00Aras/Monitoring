@@ -15,10 +15,6 @@ import sys
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-######
-# Import a method's module, isolating cleaning_utils/db_utils name collisions
-######
-
 def _import_method_module(method):
     method = method.upper()
 
