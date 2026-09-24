@@ -207,10 +207,13 @@ def run_batch(baseline_vectors, features, timestamps, threshold=THRESHOLD, regul
 # Calibrate the MD threshold on a clean baseline: binary search for the
 # smallest threshold that produces at most `target` alarms when the
 # reference is fitted on and scored over the baseline itself.
+# The upper bound must lie above the largest baseline distance: short
+# cpu_iowait_pct blips reach distances of several hundred, and a bound
+# below that silently returns the bound instead of meeting the target.
 ######
 
 def calibrate_threshold(baseline_vectors, timestamps, target=CALIBRATION_TARGET,
-                        low=0.5, high=50.0, tolerance=0.01, max_iter=50, regulator=1e-8):
+                        low=0.5, high=2000.0, tolerance=0.01, max_iter=50, regulator=1e-8):
     best = high
     for _ in range(max_iter):
         mid = (low + high) / 2
