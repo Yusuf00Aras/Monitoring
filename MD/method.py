@@ -4,7 +4,6 @@ import logging
 from scipy.spatial import distance
 import numpy as np
 from cleaning_utils import extract_important_features
-from sklearn.covariance import MinCovDet
 from sklearn.preprocessing import StandardScaler
 from db_utils import fetch_and_append
 
@@ -112,27 +111,29 @@ def mahalanobis_distances(data, regulator=1e-8, invertible=True):
 # and is never updated afterward -- injected/evaluation data does not
 # change the reference distribution.
 #
-# The baseline cannot be verified to be incident-free, so the Minimum
-# Covariance Determinant (MCD) estimator is used: it fits location and
-# covariance on the MCD_SUPPORT share of most typical minutes and ignores
-# the rest, so a short incident in the baseline (up to ~2 %, i.e. ~14 of
-# 720 minutes) does not distort the reference. A larger discarded share
-# (or median/MAD) would treat the busy part of the normal day cycle as
-# outliers. The features are standardised before fitting only for
+# The classical sample mean and covariance over the whole baseline are
+# used. A robust Minimum Covariance Determinant (MCD) fit on the 98 % most
+# typical minutes was used before, but on this server several metrics are
+# discrete or mostly zero (e.g. cpu_iowait_pct, sys_proc_running): the MCD
+# subset makes their variance tiny, so ordinary short I/O waits reached
+# baseline distances of up to ~855 (p99 ~138 instead of ~5 under the
+# chi-square model). The classical fit keeps these normal blips inside
+# the reference (p99 ~8). The price is that an incident in the baseline
+# would widen the reference, so the baseline must be checked to be free
+# of known tests. The features are standardised before fitting only for
 # numerical stability (their scales differ by ~1e11); the Mahalanobis
 # distance itself is scale-invariant.
 ######
-
-MCD_SUPPORT = 0.98
-
 
 def md_fit(baseline_vectors, regulator=1e-8):
     X = np.asarray(baseline_vectors, dtype=float)
     scale = np.std(X, axis=0, ddof=1)
     scale[scale == 0] = 1.0
-    mcd = MinCovDet(support_fraction=MCD_SUPPORT, random_state=0).fit(X / scale)
+    Z = X / scale
+    location = Z.mean(axis=0)
+    covariance = np.cov(Z, rowvar=False)
 
-    cov_reg = mcd.covariance_ + regulator * np.eye(X.shape[1])
+    cov_reg = covariance + regulator * np.eye(X.shape[1])
     try:
         inv_scaled = np.linalg.inv(cov_reg)
     except np.linalg.LinAlgError:
@@ -140,7 +141,7 @@ def md_fit(baseline_vectors, regulator=1e-8):
 
     # Back to the original feature scale: S = D C D  =>  S^-1 = D^-1 C^-1 D^-1.
     inv_cov = inv_scaled / np.outer(scale, scale)
-    return {'mean': mcd.location_ * scale, 'inv_cov': inv_cov}
+    return {'mean': location * scale, 'inv_cov': inv_cov}
 
 
 ######
@@ -207,8 +208,7 @@ def run_batch(baseline_vectors, features, timestamps, threshold=THRESHOLD, regul
 # Calibrate the MD threshold on a clean baseline: binary search for the
 # smallest threshold that produces at most `target` alarms when the
 # reference is fitted on and scored over the baseline itself.
-# The upper bound must lie above the largest baseline distance: short
-# cpu_iowait_pct blips reach distances of several hundred, and a bound
+# The upper bound must lie above the largest baseline distance; a bound
 # below that silently returns the bound instead of meeting the target.
 ######
 
